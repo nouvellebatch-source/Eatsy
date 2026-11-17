@@ -237,6 +237,8 @@ def init_db(settings: Settings) -> None:
         with db.cursor() as cursor:
             for statement in SCHEMA_STATEMENTS:
                 cursor.execute(statement)
+    init_orders(settings)
+    init_tables(settings)
 
 
 def init_catalog(settings: Settings) -> None:
@@ -265,6 +267,48 @@ def init_orders(settings: Settings) -> None:
                 quantity SMALLINT UNSIGNED NOT NULL,
                 FOREIGN KEY (order_item_id) REFERENCES order_items(id),
                 FOREIGN KEY (product_id) REFERENCES menu_products(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+
+
+def init_tables(settings: Settings) -> None:
+    """Crea el mapa de mesas sin modificar registros existentes."""
+    with connection(settings) as db:
+        with db.cursor() as cursor:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS restaurant_tables (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                restaurant_id BIGINT UNSIGNED NOT NULL,
+                branch_id BIGINT UNSIGNED NOT NULL,
+                table_number SMALLINT UNSIGNED NOT NULL,
+                capacity SMALLINT UNSIGNED NOT NULL DEFAULT 4,
+                created_by BIGINT UNSIGNED NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_restaurant_table (branch_id,table_number),
+                FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+                FOREIGN KEY (branch_id) REFERENCES restaurant_branches(id),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS reservations (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                restaurant_id BIGINT UNSIGNED NOT NULL,
+                table_id BIGINT UNSIGNED NOT NULL,
+                customer_name VARCHAR(160) NOT NULL,
+                party_size SMALLINT UNSIGNED NOT NULL,
+                starts_at DATETIME NOT NULL,
+                ends_at DATETIME NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'confirmed',
+                created_by BIGINT UNSIGNED NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_reservation_table_time (table_id,status,starts_at,ends_at),
+                FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+                FOREIGN KEY (table_id) REFERENCES restaurant_tables(id),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS payment_confirmations (
+                order_id BIGINT UNSIGNED PRIMARY KEY,
+                actor_id BIGINT UNSIGNED NOT NULL,
+                confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (actor_id) REFERENCES users(id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
 
 

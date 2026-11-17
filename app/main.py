@@ -25,7 +25,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
-from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput
+from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -177,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # El catálogo es público; permitir su lectura desde navegadores sin
         # ampliar CORS de autenticación, usuarios, pedidos ni otros recursos.
         if request.method == 'GET' and re.fullmatch(
-            r'/restaurantes(?:/[0-9]+/(?:sucursales|categorias|productos))?', request.url.path
+            r'/restaurantes(?:/[0-9]+/(?:sucursales(?:/[0-9]+/mesas)?|categorias|productos))?', request.url.path
         ):
             response.headers['Access-Control-Allow-Origin'] = '*'
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -253,6 +253,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     WHERE b.id=%s AND b.restaurant_id=%s AND b.active=1 AND r.active=1''', (data.branch_id, data.restaurant_id))
                 if not cursor.fetchone():
                     raise HTTPException(404, 'Restaurante o sucursal no disponible.')
+                if data.fulfillment == 'dine_in':
+                    if not data.table_number or not re.fullmatch(r'[1-9][0-9]{0,4}', data.table_number):
+                        raise HTTPException(422, 'Selecciona una mesa válida de la sucursal.')
+                    cursor.execute('SELECT id FROM restaurant_tables WHERE restaurant_id=%s AND branch_id=%s AND table_number=%s',
+                                   (data.restaurant_id,data.branch_id,int(data.table_number)))
+                    if not cursor.fetchone():
+                        raise HTTPException(409, 'La mesa no está registrada en esta sucursal.')
                 products = {}
                 product_ids = {item.product_id for item in data.items}
                 product_ids.update(add.product_id for item in data.items for add in item.additions)
@@ -343,6 +350,109 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404, 'Pedido no encontrado.')
             cursor.execute('SELECT previous_status, new_status, created_at FROM order_events WHERE order_id=%s ORDER BY id', (order_id,))
             return cursor.fetchall()
+
+    @app.get('/restaurantes/{restaurant_id}/sucursales/{branch_id}/mesas', response_model=list[PublicTableOutput])
+    def public_tables(restaurant_id: int, branch_id: int, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('''SELECT t.table_number,t.capacity FROM restaurant_tables t
+                JOIN restaurant_branches b ON b.id=t.branch_id AND b.restaurant_id=t.restaurant_id AND b.active=1
+                JOIN restaurants r ON r.id=t.restaurant_id AND r.active=1
+                WHERE t.restaurant_id=%s AND t.branch_id=%s ORDER BY t.table_number''', (restaurant_id, branch_id))
+            return cursor.fetchall()
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/mesas', response_model=list[RestaurantTableOutput])
+    def restaurant_tables(restaurant_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen','cashier')", (restaurant_id, user['id']))
+            if not cursor.fetchone():
+                raise HTTPException(403, 'No tienes acceso a este restaurante.')
+            cursor.execute('''SELECT t.id,t.branch_id,b.name AS branch_name,t.table_number,t.capacity,
+                o.id AS order_id,o.status AS order_status,
+                CONCAT(u.nombre,' ',u.apellido) AS customer_name,
+                COALESCE(summary.active_orders,0) AS active_orders,
+                COALESCE(summary.total_orders,0) AS total_orders,
+                COALESCE(summary.total_paid,0) AS total_paid,
+                summary.customer_names
+                FROM restaurant_tables t JOIN restaurant_branches b ON b.id=t.branch_id AND b.restaurant_id=t.restaurant_id AND b.active=1
+                LEFT JOIN (SELECT o3.restaurant_id,o3.branch_id,o3.table_number,
+                    COUNT(*) AS active_orders, SUM(o3.total) AS total_orders,
+                    SUM(CASE WHEN o3.payment_status='paid' THEN o3.total ELSE 0 END) AS total_paid,
+                    GROUP_CONCAT(DISTINCT CONCAT(u3.nombre,' ',u3.apellido) ORDER BY u3.nombre SEPARATOR ', ') AS customer_names
+                    FROM orders o3 JOIN users u3 ON u3.id=o3.customer_id
+                    WHERE o3.fulfillment='dine_in' AND o3.status IN ('pending_acceptance','confirmed','preparing','cooked','ready')
+                    AND o3.restaurant_id=%s GROUP BY o3.restaurant_id,o3.branch_id,o3.table_number) summary
+                    ON summary.restaurant_id=t.restaurant_id AND summary.branch_id=t.branch_id AND summary.table_number=CAST(t.table_number AS CHAR)
+                LEFT JOIN orders o ON o.id=(SELECT MAX(o2.id) FROM orders o2
+                    WHERE o2.restaurant_id=t.restaurant_id AND o2.branch_id=t.branch_id
+                    AND o2.fulfillment='dine_in' AND o2.table_number=CAST(t.table_number AS CHAR)
+                    AND o2.status IN ('pending_acceptance','confirmed','preparing','cooked','ready'))
+                LEFT JOIN users u ON u.id=o.customer_id
+                WHERE t.restaurant_id=%s ORDER BY b.name,t.table_number''', (restaurant_id,restaurant_id))
+            return cursor.fetchall()
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/reservas', response_model=list[ReservationOutput])
+    def list_reservations(restaurant_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'No tienes acceso a reservas.')
+            cursor.execute('''SELECT r.id,r.table_id,t.table_number,r.customer_name,r.party_size,r.starts_at,r.ends_at,r.status
+                FROM reservations r JOIN restaurant_tables t ON t.id=r.table_id AND t.restaurant_id=r.restaurant_id
+                WHERE r.restaurant_id=%s ORDER BY r.starts_at DESC LIMIT 200''', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/reservas', response_model=ReservationOutput, status_code=201)
+    def create_reservation(restaurant_id: int, data: ReservationInput, user: User, db: DB):
+        starts = data.starts_at.astimezone(timezone.utc).replace(tzinfo=None)
+        ends = data.ends_at.astimezone(timezone.utc).replace(tzinfo=None)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
+                if not cursor.fetchone(): raise HTTPException(403, 'No tienes permiso para crear reservas.')
+                cursor.execute('SELECT id,table_number,capacity FROM restaurant_tables WHERE id=%s AND restaurant_id=%s FOR UPDATE', (data.table_id,restaurant_id))
+                table = cursor.fetchone()
+                if not table: raise HTTPException(404, 'Mesa no encontrada.')
+                if data.party_size > table['capacity']: raise HTTPException(422, 'La mesa no tiene capacidad para ese grupo.')
+                cursor.execute("SELECT id FROM reservations WHERE table_id=%s AND status='confirmed' AND starts_at < %s AND ends_at > %s LIMIT 1", (data.table_id,ends,starts))
+                if cursor.fetchone(): raise HTTPException(409, 'La mesa ya tiene una reserva para ese horario.')
+                cursor.execute('INSERT INTO reservations (restaurant_id,table_id,customer_name,party_size,starts_at,ends_at,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s)', (restaurant_id,data.table_id,data.customer_name,data.party_size,starts,ends,user['id']))
+                result = {'id':cursor.lastrowid,'table_id':data.table_id,'table_number':table['table_number'],'customer_name':data.customer_name,'party_size':data.party_size,'starts_at':starts,'ends_at':ends,'status':'confirmed'}
+            db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            raise
+
+    @app.patch('/gestion/restaurantes/{restaurant_id}/reservas/{reservation_id}/cancelar', status_code=204)
+    def cancel_reservation(restaurant_id: int, reservation_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'No tienes permiso para cancelar reservas.')
+            cursor.execute("UPDATE reservations SET status='cancelled' WHERE id=%s AND restaurant_id=%s AND status='confirmed'", (reservation_id,restaurant_id))
+            if not cursor.rowcount: raise HTTPException(404, 'Reserva activa no encontrada.')
+        return Response(status_code=204)
+
+    @app.patch('/gestion/restaurantes/{restaurant_id}/pedidos/{order_id}/pago', response_model=OrderOutput)
+    def confirm_cash_payment(restaurant_id: int, order_id: int, user: User, db: DB):
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
+                if not cursor.fetchone(): raise HTTPException(403, 'No tienes permiso para confirmar pagos.')
+                cursor.execute('SELECT * FROM orders WHERE id=%s AND restaurant_id=%s FOR UPDATE', (order_id,restaurant_id))
+                order = cursor.fetchone()
+                if not order: raise HTTPException(404, 'Pedido no encontrado.')
+                if order['payment_method'] != 'cash': raise HTTPException(409, 'Solo se pueden confirmar pagos en efectivo.')
+                if order['payment_status'] == 'pending':
+                    cursor.execute("UPDATE orders SET payment_status='paid' WHERE id=%s AND restaurant_id=%s", (order_id,restaurant_id))
+                    cursor.execute('INSERT INTO payment_confirmations (order_id,actor_id) VALUES (%s,%s)', (order_id,user['id']))
+                    order['payment_status'] = 'paid'
+                elif order['payment_status'] != 'paid': raise HTTPException(409, 'Estado de pago no permitido.')
+            db.commit()
+            return order
+        except Exception:
+            db.rollback()
+            raise
 
     @app.get('/gestion/restaurantes/{restaurant_id}/pedidos', response_model=list[KitchenOrderOutput])
     def restaurant_orders(restaurant_id: int, user: User, db: DB,

@@ -163,6 +163,54 @@ class OrderOutput(BaseModel):
     currency: str
 
 
+class RestaurantTableOutput(BaseModel):
+    id: int
+    branch_id: int
+    branch_name: str
+    table_number: int
+    capacity: int
+    order_id: int | None = None
+    order_status: str | None = None
+    customer_name: str | None = None
+    customer_names: str | None = None
+    active_orders: int = 0
+    total_orders: int = 0
+    total_paid: int = 0
+
+
+class PublicTableOutput(BaseModel):
+    table_number: int
+    capacity: int
+
+
+class ReservationInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    table_id: int = Field(gt=0)
+    customer_name: str = Field(min_length=1, max_length=160)
+    party_size: int = Field(ge=1, le=100, strict=True)
+    starts_at: datetime
+    ends_at: datetime
+
+    @model_validator(mode='after')
+    def valid_times(self):
+        if self.starts_at.utcoffset() is None or self.ends_at.utcoffset() is None:
+            raise ValueError('Las fechas deben incluir zona horaria.')
+        if self.ends_at <= self.starts_at:
+            raise ValueError('La hora final debe ser posterior a la inicial.')
+        return self
+
+
+class ReservationOutput(BaseModel):
+    id: int
+    table_id: int
+    table_number: int
+    customer_name: str
+    party_size: int
+    starts_at: datetime
+    ends_at: datetime
+    status: str
+
+
 class KitchenOrderItem(BaseModel):
     product_name: str
     quantity: int

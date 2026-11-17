@@ -5,7 +5,7 @@ import getpass
 import pymysql
 
 from app.config import Settings
-from app.database import connection, enable_customer_role, init_catalog, init_db, init_orders
+from app.database import connection, enable_customer_role, init_catalog, init_db, init_orders, init_tables
 from app.security import password_hasher
 
 
@@ -42,6 +42,30 @@ def _assign_kitchen(args: argparse.Namespace, settings: Settings) -> None:
     print('Acceso de cocina asignado o reactivado.')
 
 
+def _assign_restaurant_role(args: argparse.Namespace, settings: Settings) -> None:
+    """Vincula una cuenta existente y verificada, sin alterar membresías existentes."""
+    with connection(settings) as db:
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute('SELECT u.id,u.rol FROM users u JOIN customer_emails e ON e.user_id=u.id WHERE u.usuario=%s AND u.activo=1 AND e.verified_at IS NOT NULL FOR UPDATE', (args.usuario,))
+                user = cursor.fetchone()
+                cursor.execute('SELECT id FROM restaurants WHERE slug=%s AND active=1', (args.restaurante,))
+                restaurant = cursor.fetchone()
+                if not user or not restaurant:
+                    raise ValueError('Cuenta verificada o restaurante no encontrado.')
+                cursor.execute('SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s', (restaurant['id'], user['id']))
+                if cursor.fetchone():
+                    raise ValueError('La cuenta ya tiene una membresía; no se modificó.')
+                cursor.execute('INSERT INTO restaurant_memberships (restaurant_id,user_id,role,active) VALUES (%s,%s,%s,1)',
+                               (restaurant['id'], user['id'], args.rol))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+    print('Cuenta verificada vinculada al restaurante.')
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Administración MySQL de Eatsy")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -49,6 +73,9 @@ def main() -> None:
     commands.add_parser("check-db", help="Comprueba la conexión y las tablas principales.")
     commands.add_parser("init-catalog", help="Crea las tablas de restaurantes, sucursales y menús.")
     commands.add_parser("init-orders", help="Crea las tablas de pedidos y comanda.")
+    tables = commands.add_parser('seed-tables', help='Crea el mapa inicial de 15 mesas sin reemplazar mesas existentes.')
+    tables.add_argument('--restaurante', required=True)
+    tables.add_argument('--sucursal', required=True, type=int)
     commands.add_parser("migrate-customers", help="Habilita el rol de cliente y crea tablas de verificación.")
     create = commands.add_parser("create-user", help="Crea un usuario desde terminal.")
     create.add_argument("--usuario", required=True)
@@ -58,6 +85,10 @@ def main() -> None:
     kitchen = commands.add_parser('assign-kitchen', help='Da acceso a la comanda a un usuario staff o admin existente.')
     kitchen.add_argument('--usuario', required=True)
     kitchen.add_argument('--restaurante', required=True, help='Slug del restaurante.')
+    membership = commands.add_parser('assign-restaurant-role', help='Vincula una cuenta verificada a un restaurante.')
+    membership.add_argument('--usuario', required=True)
+    membership.add_argument('--restaurante', required=True)
+    membership.add_argument('--rol', required=True, choices=['owner', 'kitchen', 'cashier', 'courier'])
     args = parser.parse_args()
     settings = Settings.from_env()
     try:
@@ -70,6 +101,24 @@ def main() -> None:
         elif args.command == "init-orders":
             init_orders(settings)
             print("Tablas de pedidos y comanda inicializadas.")
+        elif args.command == 'seed-tables':
+            init_tables(settings)
+            with connection(settings) as db:
+                db.begin()
+                try:
+                    with db.cursor() as cursor:
+                        cursor.execute('SELECT r.id FROM restaurants r JOIN restaurant_branches b ON b.restaurant_id=r.id WHERE r.slug=%s AND b.id=%s AND r.active=1 AND b.active=1', (args.restaurante,args.sucursal))
+                        restaurant = cursor.fetchone()
+                        if not restaurant:
+                            raise ValueError('Restaurante o sucursal no disponible.')
+                        added = 0
+                        for number in range(1, 16):
+                            added += cursor.execute('INSERT IGNORE INTO restaurant_tables (restaurant_id,branch_id,table_number,capacity,created_by) VALUES (%s,%s,%s,4,NULL)', (restaurant['id'], args.sucursal, number))
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+            print(f'Mapas inicializados: {added} mesas creadas; las existentes no se modificaron.')
         elif args.command == "migrate-customers":
             init_db(settings)
             enable_customer_role(settings)
@@ -84,6 +133,8 @@ def main() -> None:
             print(f"Conexión correcta a {database_name}. Tablas: {', '.join(tables) or 'ninguna'}")
         elif args.command == 'assign-kitchen':
             _assign_kitchen(args, settings)
+        elif args.command == 'assign-restaurant-role':
+            _assign_restaurant_role(args, settings)
         else:
             _create_user(args, settings)
     except (OSError, ValueError, pymysql.MySQLError) as error:

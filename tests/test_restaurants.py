@@ -16,6 +16,16 @@ class Database:
 
 
 class RestaurantCatalogTests(unittest.TestCase):
+    def test_categories_are_scoped_to_available_products(self):
+        app = create_app()
+        endpoint = next(r.endpoint for r in app.routes if r.path == '/restaurantes/{restaurant_id}/categorias')
+        db = Database()
+        db.c.fetchall = lambda: [{'category': 'Pizzas'}, {'category': 'Bebidas'}]
+        self.assertEqual(endpoint(42, db), ['Pizzas', 'Bebidas'])
+        self.assertEqual(db.c.params, (42,))
+        self.assertIn('p.available=1', db.c.sql)
+        self.assertIn('r.active=1', db.c.sql)
+
     def test_menu_filter_is_parameterized_and_scoped(self):
         app = create_app()
         endpoint = next(r.endpoint for r in app.routes if r.path == '/restaurantes/{restaurant_id}/productos')

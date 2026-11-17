@@ -199,6 +199,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cursor.execute('SELECT b.id, b.restaurant_id, b.name, b.address, b.city, b.latitude, b.longitude FROM restaurant_branches b JOIN restaurants r ON r.id=b.restaurant_id WHERE b.restaurant_id=%s AND b.active=1 AND r.active=1 ORDER BY b.name, b.id', (restaurant_id,))
             return cursor.fetchall()
 
+    @app.get('/restaurantes/{restaurant_id}/categorias', response_model=list[str])
+    def restaurant_categories(restaurant_id: int, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('SELECT DISTINCT p.category FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 ORDER BY p.category', (restaurant_id,))
+            return [row['category'] for row in cursor.fetchall()]
+
     @app.get('/restaurantes/{restaurant_id}/productos', response_model=list[MenuProductOutput])
     def restaurant_products(restaurant_id: int, db: DB,
                             categoria: Annotated[str | None, Query(max_length=100)] = None,

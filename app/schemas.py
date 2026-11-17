@@ -1,9 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, SecretStr
 
-Role = Literal["admin", "staff"]
+Role = Literal["admin", "staff", "customer"]
 
 
 class UserInput(BaseModel):
@@ -17,7 +17,19 @@ class UserRegistration(BaseModel):
     nombre: str = Field(min_length=1, max_length=80)
     apellido: str = Field(min_length=1, max_length=80)
     usuario: str = Field(min_length=1, max_length=80)
+    correo: EmailStr
     contrasena: SecretStr = Field(min_length=12, max_length=128)
+
+
+class VerifyRegistration(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    correo: EmailStr
+    codigo: str = Field(pattern=r"^[0-9]{6}$")
+
+
+class ResendVerification(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    correo: EmailStr
 
 
 class UserOutput(BaseModel):

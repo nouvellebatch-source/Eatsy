@@ -1,7 +1,11 @@
 """API Eatsy preparada para MySQL en Aiven y despliegue en Render."""
 from contextlib import asynccontextmanager
 import os
+import hashlib
+import hmac
+import secrets
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
 from uuid import uuid4
 
@@ -16,12 +20,46 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.config import Settings
 from app.database import connection
-from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration
+from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
+from app.email_service import send_verification_email, EmailDeliveryError
 
 
 bearer = HTTPBearer(auto_error=False)
 ProductID = Annotated[int, Path(ge=1, le=10_000_000_000)]
+
+
+def _email_verification_enabled() -> bool:
+    return os.environ.get('EMAIL_VERIFICATION_ENABLED', 'false').strip().lower() in {'true', '1', 'yes', 'on'}
+
+
+def _require_email_verification() -> None:
+    if not _email_verification_enabled():
+        raise HTTPException(503, 'El registro y la verificación por correo aún no están disponibles.')
+
+
+def _code_digest(secret: str, email: str, code: str) -> str:
+    return hmac.new(secret.encode(), f'{email}:{code}'.encode(), hashlib.sha256).hexdigest()
+
+
+def _check_send_limit(cursor, request: Request, now: datetime) -> None:
+    client = _client_ip(request) or 'unknown'
+    key = hmac.new(request.app.state.settings.secret.encode(), client.encode(), hashlib.sha256).hexdigest()
+    cursor.execute('INSERT IGNORE INTO verification_send_limits (client_hash, window_start, sent_count) VALUES (%s, %s, 0)', (key, now))
+    cursor.execute('SELECT window_start, sent_count FROM verification_send_limits WHERE client_hash=%s FOR UPDATE', (key,))
+    row = cursor.fetchone()
+    count = 0 if now - row['window_start'] >= timedelta(hours=1) else row['sent_count']
+    if count >= 10:
+        raise HTTPException(429, 'Demasiadas solicitudes. Inténtalo más tarde.')
+    cursor.execute('UPDATE verification_send_limits SET window_start=%s, sent_count=%s WHERE client_hash=%s',
+                   (now if count == 0 else row['window_start'], count + 1, key))
+
+
+def _send_code(email: str, code: str) -> None:
+    try:
+        send_verification_email(email, code)
+    except EmailDeliveryError:
+        raise HTTPException(503, 'No fue posible enviar el correo. Inténtalo más tarde.') from None
 
 
 def get_db(request: Request):
@@ -141,33 +179,182 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok"}
 
-    @app.post("/auth/registro", response_model=UserOutput, status_code=status.HTTP_201_CREATED)
-    def register(data: UserRegistration, db: DB):
+    @app.post("/auth/registro", status_code=status.HTTP_202_ACCEPTED)
+    def register(data: UserRegistration, db: DB, request: Request):
+        _require_email_verification()
+        email = str(data.correo).strip().lower()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        code = f'{secrets.randbelow(1_000_000):06d}'
         password_hash = password_hasher.hash(data.contrasena.get_secret_value())
         try:
+            db.begin()
             with db.cursor() as cursor:
+                _check_send_limit(cursor, request, now)
+                cursor.execute('SELECT id FROM users WHERE usuario=%s', (data.usuario,))
+                if cursor.fetchone():
+                    raise HTTPException(409, 'Usuario no disponible.')
+                cursor.execute('SELECT user_id FROM customer_emails WHERE email=%s', (email,))
+                if cursor.fetchone():
+                    raise HTTPException(409, 'No se pudo crear la cuenta con esos datos.')
                 cursor.execute(
-                    "INSERT INTO users (usuario, nombre, apellido, password_hash, rol) VALUES (%s, %s, %s, %s, %s)",
-                    (data.usuario, data.nombre, data.apellido, password_hash, "staff"),
+                    """INSERT INTO pending_registrations
+                    (email, usuario, nombre, apellido, password_hash, code_hash, expires_at, last_sent_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (email, data.usuario, data.nombre, data.apellido, password_hash,
+                     _code_digest(request.app.state.settings.secret, email, code), now + timedelta(minutes=10), now),
                 )
-                user_id = cursor.lastrowid
+                _send_code(email, code)
+            db.commit()
         except pymysql.IntegrityError as error:
+            db.rollback()
             if error.args and error.args[0] == 1062:
-                raise HTTPException(status_code=409, detail="Ese nombre de usuario ya está registrado.") from None
+                raise HTTPException(status_code=409, detail="Ya existe un registro con esos datos; solicita el reenvío del código.") from None
             raise
-        return {"id": user_id, "usuario": data.usuario, "nombre": data.nombre, "apellido": data.apellido, "rol": "staff"}
+        except Exception:
+            db.rollback()
+            raise
+        return {'detail': 'Enviamos un código de verificación al correo.'}
+
+    @app.post('/auth/reenviar-codigo', status_code=202)
+    def resend(data: ResendVerification, db: DB, request: Request):
+        _require_email_verification()
+        email = str(data.correo).strip().lower()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                _check_send_limit(cursor, request, now)
+                cursor.execute('SELECT last_sent_at FROM pending_registrations WHERE email=%s FOR UPDATE', (email,))
+                row = cursor.fetchone()
+                if row and now - row['last_sent_at'] < timedelta(seconds=60):
+                    raise HTTPException(429, 'Espera un minuto antes de solicitar otro código.')
+                if row:
+                    code = f'{secrets.randbelow(1_000_000):06d}'
+                    cursor.execute('UPDATE pending_registrations SET code_hash=%s, expires_at=%s, last_sent_at=%s, attempts=0 WHERE email=%s',
+                        (_code_digest(request.app.state.settings.secret, email, code), now + timedelta(minutes=10), now, email))
+                    _send_code(email, code)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {'detail': 'Si existe un registro pendiente, recibirás un código.'}
+
+    @app.post('/auth/verificar-correo', response_model=UserOutput, status_code=201)
+    def verify_registration(data: VerifyRegistration, db: DB, request: Request):
+        _require_email_verification()
+        email = str(data.correo).strip().lower()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute('SELECT * FROM pending_registrations WHERE email=%s FOR UPDATE', (email,))
+                row = cursor.fetchone()
+                if not row or row['expires_at'] <= now or row['attempts'] >= 5:
+                    raise HTTPException(400, 'Código inválido o vencido. Solicita uno nuevo.')
+                expected = _code_digest(request.app.state.settings.secret, email, data.codigo)
+                if not hmac.compare_digest(expected, row['code_hash']):
+                    cursor.execute('UPDATE pending_registrations SET attempts=attempts+1 WHERE email=%s', (email,))
+                    db.commit()
+                    raise HTTPException(400, 'Código inválido o vencido. Solicita uno nuevo.')
+                cursor.execute('INSERT INTO users (usuario,nombre,apellido,password_hash,rol) VALUES (%s,%s,%s,%s,%s)',
+                               (row['usuario'], row['nombre'], row['apellido'], row['password_hash'], 'customer'))
+                user_id = cursor.lastrowid
+                cursor.execute('INSERT INTO customer_emails (user_id,email,verified_at) VALUES (%s,%s,%s)', (user_id,email,now))
+                cursor.execute('DELETE FROM pending_registrations WHERE email=%s', (email,))
+            db.commit()
+            return {'id': user_id, 'usuario': row['usuario'], 'nombre': row['nombre'], 'apellido': row['apellido'], 'rol': 'customer'}
+        except pymysql.IntegrityError:
+            db.rollback()
+            raise HTTPException(409, 'No se pudo crear la cuenta con esos datos.') from None
+        except Exception:
+            db.rollback()
+            raise
 
     @app.post("/auth/login", response_model=OutputToken)
     def login(data: UserInput, db: DB, request: Request):
         with db.cursor() as cursor:
-            cursor.execute("SELECT * FROM users WHERE usuario = %s", (data.usuario,))
+            if _email_verification_enabled():
+                cursor.execute("SELECT u.*, e.email AS verified_email FROM users u LEFT JOIN customer_emails e ON e.user_id=u.id WHERE u.usuario=%s OR e.email=%s LIMIT 1", (data.usuario, data.usuario))
+            else:
+                cursor.execute("SELECT u.*, NULL AS verified_email FROM users u WHERE u.usuario=%s LIMIT 1", (data.usuario,))
             user = cursor.fetchone()
-        if user is None or not user["activo"] or not verify_password(data.contrasena.get_secret_value(), user["password_hash"]):
+        valid = verify_password(data.contrasena.get_secret_value(), user['password_hash'] if user else None)
+        if user and user['verified_email']:
+            db.begin()
+            try:
+                with db.cursor() as cursor:
+                    cursor.execute('INSERT IGNORE INTO login_verifications (user_id) VALUES (%s)', (user['id'],))
+                    cursor.execute('SELECT failures FROM login_verifications WHERE user_id=%s FOR UPDATE', (user['id'],))
+                    failures = cursor.fetchone()['failures']
+                    if failures >= 5:
+                        db.commit()
+                        raise HTTPException(403, 'Verifica tu correo para desbloquear el acceso.')
+                    if not valid or not user['activo']:
+                        cursor.execute('UPDATE login_verifications SET failures=failures+1 WHERE user_id=%s', (user['id'],))
+                        if failures + 1 >= 5:
+                            db.commit()
+                            raise HTTPException(403, 'Verifica tu correo para desbloquear el acceso.')
+                    else:
+                        cursor.execute('UPDATE login_verifications SET failures=0 WHERE user_id=%s', (user['id'],))
+                db.commit()
+            except Exception:
+                db.rollback()
+                raise
+        if user is None or not user["activo"] or not valid:
             raise unauthorized_error()
         token, issued_at, jti = create_token(user["id"], request.app.state.settings)
         return OutputToken(access_token=token, expires_in=request.app.state.settings.token_minutes * 60,
                            issued_at=issued_at, jti=jti, audience=request.app.state.settings.audience,
                            issuer=request.app.state.settings.issuer, usuario=UserOutput.model_validate(user))
+
+    @app.post('/auth/codigo-acceso', status_code=202)
+    def request_login_code(data: ResendVerification, db: DB, request: Request):
+        _require_email_verification()
+        email = str(data.correo).strip().lower()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                _check_send_limit(cursor, request, now)
+                cursor.execute('''SELECT v.user_id, v.last_sent_at FROM login_verifications v
+                    JOIN customer_emails e ON e.user_id=v.user_id WHERE e.email=%s AND v.failures>=5 FOR UPDATE''', (email,))
+                row = cursor.fetchone()
+                if row and row['last_sent_at'] and now-row['last_sent_at'] < timedelta(seconds=60):
+                    raise HTTPException(429, 'Espera un minuto antes de solicitar otro código.')
+                if row:
+                    code = f'{secrets.randbelow(1_000_000):06d}'
+                    cursor.execute('UPDATE login_verifications SET code_hash=%s, expires_at=%s, last_sent_at=%s, attempts=0 WHERE user_id=%s',
+                        (_code_digest(request.app.state.settings.secret, email, code), now+timedelta(minutes=10), now, row['user_id']))
+                    _send_code(email, code)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {'detail': 'Si la cuenta requiere verificación, recibirás un código.'}
+
+    @app.post('/auth/verificar-acceso')
+    def verify_login_code(data: VerifyRegistration, db: DB, request: Request):
+        _require_email_verification()
+        email = str(data.correo).strip().lower()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute('''SELECT v.* FROM login_verifications v JOIN customer_emails e ON e.user_id=v.user_id
+                    WHERE e.email=%s AND v.failures>=5 FOR UPDATE''', (email,))
+                row = cursor.fetchone()
+                if not row or not row['code_hash'] or row['expires_at'] <= now or row['attempts'] >= 5:
+                    raise HTTPException(400, 'Código inválido o vencido.')
+                if not hmac.compare_digest(row['code_hash'], _code_digest(request.app.state.settings.secret, email, data.codigo)):
+                    cursor.execute('UPDATE login_verifications SET attempts=attempts+1 WHERE user_id=%s', (row['user_id'],))
+                    db.commit()
+                    raise HTTPException(400, 'Código inválido o vencido.')
+                cursor.execute('UPDATE login_verifications SET failures=0, code_hash=NULL, expires_at=NULL, attempts=0 WHERE user_id=%s', (row['user_id'],))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {'detail': 'Correo verificado. Ya puedes iniciar sesión.'}
 
     @app.post("/auth/logout", status_code=204)
     def logout(request: Request, credentials: HTTPAuthorizationCredentials | None = Depends(bearer)):

@@ -18,8 +18,47 @@ SCHEMA_STATEMENTS = (
         activo TINYINT(1) NOT NULL DEFAULT 1,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-        CONSTRAINT chk_users_role CHECK (rol IN ('admin', 'staff')),
+        CONSTRAINT chk_users_role CHECK (rol IN ('admin', 'staff', 'customer')),
         CONSTRAINT chk_users_active CHECK (activo IN (0, 1))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pending_registrations (
+        email VARCHAR(254) NOT NULL PRIMARY KEY,
+        usuario VARCHAR(80) NOT NULL UNIQUE,
+        nombre VARCHAR(80) NOT NULL,
+        apellido VARCHAR(80) NOT NULL,
+        password_hash VARCHAR(255) NOT NULL,
+        code_hash CHAR(64) NOT NULL,
+        expires_at DATETIME NOT NULL,
+        last_sent_at DATETIME NOT NULL,
+        attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS customer_emails (
+        user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        email VARCHAR(254) NOT NULL UNIQUE,
+        verified_at DATETIME NOT NULL,
+        CONSTRAINT fk_customer_emails_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS verification_send_limits (
+        client_hash CHAR(64) NOT NULL PRIMARY KEY,
+        window_start DATETIME NOT NULL,
+        sent_count SMALLINT UNSIGNED NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS login_verifications (
+        user_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+        failures SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+        code_hash CHAR(64) NULL,
+        expires_at DATETIME NULL,
+        last_sent_at DATETIME NULL,
+        attempts SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+        CONSTRAINT fk_login_verifications_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
@@ -98,3 +137,17 @@ def init_db(settings: Settings) -> None:
         with db.cursor() as cursor:
             for statement in SCHEMA_STATEMENTS:
                 cursor.execute(statement)
+
+
+def enable_customer_role(settings: Settings) -> None:
+    """Actualiza la restricción existente conservando los usuarios actuales."""
+    with connection(settings) as db:
+        with db.cursor() as cursor:
+            cursor.execute("""SELECT CHECK_CLAUSE FROM information_schema.CHECK_CONSTRAINTS
+                WHERE CONSTRAINT_SCHEMA=DATABASE() AND CONSTRAINT_NAME='chk_users_role'""")
+            row = cursor.fetchone()
+            if row and 'customer' in row['CHECK_CLAUSE'].lower():
+                return
+            if row:
+                cursor.execute('ALTER TABLE users DROP CHECK chk_users_role')
+            cursor.execute("ALTER TABLE users ADD CONSTRAINT chk_users_role CHECK (rol IN ('admin', 'staff', 'customer'))")

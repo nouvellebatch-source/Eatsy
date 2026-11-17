@@ -43,6 +43,20 @@ class VerificationTests(unittest.TestCase):
         with self.assertRaises(EmailDeliveryError):
             send_verification_email('ana@example.com', '012345')
 
+    @patch.dict(os.environ, {'BREVO_API_KEY': 'secret-key', 'CORREO_REMITENTE': 'sender@example.com'})
+    @patch('app.email_service.requests.post')
+    def test_provider_failure_logs_status_without_secrets(self, post):
+        response = requests.Response()
+        response.status_code = 401
+        post.return_value.raise_for_status.side_effect = requests.HTTPError(response=response)
+        with self.assertLogs('eatsy.email', level='ERROR') as logs:
+            with self.assertRaises(EmailDeliveryError):
+                send_verification_email('ana@example.com', '012345')
+        output = ' '.join(logs.output)
+        self.assertIn('HTTP 401', output)
+        for secret in ('secret-key', 'sender@example.com', 'ana@example.com', '012345'):
+            self.assertNotIn(secret, output)
+
     @patch.dict(os.environ, {'EMAIL_VERIFICATION_ENABLED': 'true'})
     def test_verification_expired_wrong_and_valid(self):
         class Cursor:

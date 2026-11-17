@@ -2,7 +2,7 @@ import unittest
 from fastapi import HTTPException
 from pydantic import ValidationError
 from app.main import create_app
-from app.schemas import ReservationInput
+from app.schemas import ReservationInput, CustomerReservationInput
 
 
 class Cursor:
@@ -34,6 +34,7 @@ class ReservationPaymentTests(unittest.TestCase):
         routes=create_app().routes
         self.reserve=next(r.endpoint for r in routes if r.path=='/gestion/restaurantes/{restaurant_id}/reservas' and 'POST' in r.methods)
         self.pay=next(r.endpoint for r in routes if r.path=='/gestion/restaurantes/{restaurant_id}/pedidos/{order_id}/pago')
+        self.customer_reserve=next(r.endpoint for r in routes if r.path=='/restaurantes/{restaurant_id}/reservas')
         self.data=ReservationInput(table_id=1,customer_name='Ana',party_size=4,starts_at='2026-12-01T19:00:00-05:00',ends_at='2026-12-01T20:00:00-05:00')
     def test_rejects_overlapping_reservation_and_rolls_back(self):
         db=DB(overlap=True)
@@ -56,5 +57,21 @@ class ReservationPaymentTests(unittest.TestCase):
         self.assertEqual(err.exception.status_code,403); self.assertTrue(db.rolled)
     def test_dates_require_timezone(self):
         with self.assertRaises(ValidationError): ReservationInput(table_id=1,customer_name='Ana',party_size=2,starts_at='2026-12-01T10:00:00',ends_at='2026-12-01T11:00:00')
+
+    def test_customer_booking_uses_authenticated_name(self):
+        db=DB()
+        data=CustomerReservationInput(table_id=1,party_size=2,starts_at='2026-12-01T19:00:00-05:00',ends_at='2026-12-01T20:00:00-05:00')
+        result=self.customer_reserve(1,data,{'id':7,'rol':'customer','nombre':'Ana','apellido':'Ruiz'},db)
+        self.assertEqual(result['customer_name'],'Ana Ruiz')
+        self.assertTrue(db.committed)
+        self.assertTrue(any('INSERT INTO reservations' in sql and args[-1]==7 for sql,args in db.cur.calls))
+
+    def test_customer_booking_rejects_overlapping_slot(self):
+        db=DB(overlap=True)
+        data=CustomerReservationInput(table_id=1,party_size=2,starts_at='2026-12-01T19:00:00-05:00',ends_at='2026-12-01T20:00:00-05:00')
+        with self.assertRaises(HTTPException) as error:
+            self.customer_reserve(1,data,{'id':7,'rol':'customer','nombre':'Ana','apellido':'Ruiz'},db)
+        self.assertEqual(error.exception.status_code,409)
+        self.assertTrue(db.rolled)
 
 if __name__=='__main__': unittest.main()

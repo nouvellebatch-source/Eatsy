@@ -25,7 +25,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
-from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput
+from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput, CustomerReservationInput
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -354,7 +354,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get('/restaurantes/{restaurant_id}/sucursales/{branch_id}/mesas', response_model=list[PublicTableOutput])
     def public_tables(restaurant_id: int, branch_id: int, db: DB):
         with db.cursor() as cursor:
-            cursor.execute('''SELECT t.table_number,t.capacity FROM restaurant_tables t
+            cursor.execute('''SELECT t.id,t.table_number,t.capacity FROM restaurant_tables t
                 JOIN restaurant_branches b ON b.id=t.branch_id AND b.restaurant_id=t.restaurant_id AND b.active=1
                 JOIN restaurants r ON r.id=t.restaurant_id AND r.active=1
                 WHERE t.restaurant_id=%s AND t.branch_id=%s ORDER BY t.table_number''', (restaurant_id, branch_id))
@@ -403,16 +403,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 WHERE r.restaurant_id=%s ORDER BY r.starts_at DESC LIMIT 200''', (restaurant_id,))
             return cursor.fetchall()
 
-    @app.post('/gestion/restaurantes/{restaurant_id}/reservas', response_model=ReservationOutput, status_code=201)
-    def create_reservation(restaurant_id: int, data: ReservationInput, user: User, db: DB):
+    def save_reservation(restaurant_id: int, data: ReservationInput, user: dict, db, staff_only: bool):
         starts = data.starts_at.astimezone(timezone.utc).replace(tzinfo=None)
         ends = data.ends_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if starts <= datetime.now(timezone.utc).replace(tzinfo=None):
+            raise HTTPException(422, 'Selecciona un horario futuro.')
         db.begin()
         try:
             with db.cursor() as cursor:
-                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
-                if not cursor.fetchone(): raise HTTPException(403, 'No tienes permiso para crear reservas.')
-                cursor.execute('SELECT id,table_number,capacity FROM restaurant_tables WHERE id=%s AND restaurant_id=%s FOR UPDATE', (data.table_id,restaurant_id))
+                if staff_only:
+                    cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','cashier')", (restaurant_id,user['id']))
+                    if not cursor.fetchone(): raise HTTPException(403, 'No tienes permiso para crear reservas.')
+                cursor.execute('''SELECT t.id,t.table_number,t.capacity FROM restaurant_tables t
+                    JOIN restaurant_branches b ON b.id=t.branch_id AND b.restaurant_id=t.restaurant_id AND b.active=1
+                    JOIN restaurants r ON r.id=t.restaurant_id AND r.active=1
+                    WHERE t.id=%s AND t.restaurant_id=%s FOR UPDATE''', (data.table_id,restaurant_id))
                 table = cursor.fetchone()
                 if not table: raise HTTPException(404, 'Mesa no encontrada.')
                 if data.party_size > table['capacity']: raise HTTPException(422, 'La mesa no tiene capacidad para ese grupo.')
@@ -425,6 +430,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             db.rollback()
             raise
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/reservas', response_model=ReservationOutput, status_code=201)
+    def create_reservation(restaurant_id: int, data: ReservationInput, user: User, db: DB):
+        return save_reservation(restaurant_id,data,user,db,True)
+
+    @app.post('/restaurantes/{restaurant_id}/reservas', response_model=ReservationOutput, status_code=201)
+    def create_customer_reservation(restaurant_id: int, data: CustomerReservationInput, user: User, db: DB):
+        if user['rol'] != 'customer': raise HTTPException(403, 'Necesitas una cuenta de cliente para reservar.')
+        reservation = ReservationInput(**data.model_dump(), customer_name=f"{user['nombre']} {user['apellido']}")
+        return save_reservation(restaurant_id,reservation,user,db,False)
+
+    @app.get('/mis-reservas', response_model=list[ReservationOutput])
+    def my_reservations(user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('''SELECT r.id,r.table_id,t.table_number,r.customer_name,r.party_size,r.starts_at,r.ends_at,r.status
+                FROM reservations r JOIN restaurant_tables t ON t.id=r.table_id AND t.restaurant_id=r.restaurant_id
+                WHERE r.created_by=%s ORDER BY r.starts_at DESC LIMIT 100''', (user['id'],))
+            return cursor.fetchall()
 
     @app.patch('/gestion/restaurantes/{restaurant_id}/reservas/{reservation_id}/cancelar', status_code=204)
     def cancel_reservation(restaurant_id: int, reservation_id: int, user: User, db: DB):

@@ -180,6 +180,7 @@ class RestaurantTableOutput(BaseModel):
 
 
 class PublicTableOutput(BaseModel):
+    id: int
     table_number: int
     capacity: int
 
@@ -210,6 +211,22 @@ class ReservationOutput(BaseModel):
     starts_at: datetime
     ends_at: datetime
     status: str
+
+
+class CustomerReservationInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    table_id: int = Field(gt=0)
+    party_size: int = Field(ge=1, le=100, strict=True)
+    starts_at: datetime
+    ends_at: datetime
+
+    @model_validator(mode='after')
+    def valid_times(self):
+        if self.starts_at.utcoffset() is None or self.ends_at.utcoffset() is None:
+            raise ValueError('Las fechas deben incluir zona horaria.')
+        if self.ends_at <= self.starts_at:
+            raise ValueError('La hora final debe ser posterior a la inicial.')
+        return self
 
 
 class KitchenOrderItem(BaseModel):

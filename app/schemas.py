@@ -111,10 +111,23 @@ class MenuProductOutput(BaseModel):
     image_url: str | None
 
 
+class OrderAdditionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    product_id: int = Field(gt=0)
+    quantity: int = Field(default=1, ge=1, le=20, strict=True)
+
+
 class OrderItemInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     product_id: int = Field(gt=0)
     quantity: int = Field(ge=1, le=100, strict=True)
+    additions: list[OrderAdditionInput] = Field(default_factory=list, max_length=20)
+
+    @model_validator(mode='after')
+    def unique_additions(self):
+        if len({x.product_id for x in self.additions}) != len(self.additions):
+            raise ValueError('No repitas la misma adición.')
+        return self
 
 
 class OrderInput(BaseModel):
@@ -135,8 +148,6 @@ class OrderInput(BaseModel):
             raise ValueError('La dirección es obligatoria para domicilio.')
         if self.fulfillment == 'dine_in' and not self.table_number:
             raise ValueError('El número de mesa es obligatorio en tienda.')
-        if len({item.product_id for item in self.items}) != len(self.items):
-            raise ValueError('No repitas productos en el mismo pedido.')
         return self
 
 
@@ -153,6 +164,13 @@ class OrderOutput(BaseModel):
 
 
 class KitchenOrderItem(BaseModel):
+    product_name: str
+    quantity: int
+    unit_price: int
+    additions: list['KitchenAddition'] = Field(default_factory=list)
+
+
+class KitchenAddition(BaseModel):
     product_name: str
     quantity: int
     unit_price: int

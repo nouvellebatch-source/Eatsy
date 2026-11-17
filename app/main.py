@@ -253,25 +253,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     WHERE b.id=%s AND b.restaurant_id=%s AND b.active=1 AND r.active=1''', (data.branch_id, data.restaurant_id))
                 if not cursor.fetchone():
                     raise HTTPException(404, 'Restaurante o sucursal no disponible.')
-                items = []
-                for item in sorted(data.items, key=lambda value: value.product_id):
-                    cursor.execute('''SELECT id, name, price, currency FROM menu_products
+                products = {}
+                product_ids = {item.product_id for item in data.items}
+                product_ids.update(add.product_id for item in data.items for add in item.additions)
+                for product_id in sorted(product_ids):
+                    cursor.execute('''SELECT id, name, category, price, currency FROM menu_products
                         WHERE id=%s AND restaurant_id=%s AND available=1 FOR UPDATE''',
-                        (item.product_id, data.restaurant_id))
+                        (product_id, data.restaurant_id))
                     product = cursor.fetchone()
                     if not product or product['currency'] != 'COP':
                         raise HTTPException(409, 'Uno de los productos ya no está disponible.')
-                    items.append((product, item.quantity))
-                total = sum(product['price'] * quantity for product, quantity in items)
+                    products[product_id] = product
+                items = []
+                for item in data.items:
+                    product = products[item.product_id]
+                    if product['category'].lower().startswith('adiciones'):
+                        raise HTTPException(422, 'Las adiciones deben elegirse dentro del plato.')
+                    additions = []
+                    for addition in item.additions:
+                        extra = products[addition.product_id]
+                        size = re.search(r'\((Personal|Small|Medium|Large)\)$', product['name'], re.I)
+                        extra_size = re.search(r'\((Personal|Small|Medium|Large)\)$', extra['name'], re.I)
+                        if (not product['category'].lower().startswith('pizzas') or
+                            extra['category'].lower() != 'adiciones pizza' or not size or not extra_size or
+                            size.group(1).lower() != extra_size.group(1).lower()):
+                            raise HTTPException(422, 'La adición no corresponde a esta pizza o tamaño.')
+                        additions.append((extra, addition.quantity))
+                    items.append((product, item.quantity, additions))
+                total = sum((product['price'] + sum(extra['price'] * amount for extra, amount in additions)) * quantity
+                            for product, quantity, additions in items)
                 cursor.execute('''INSERT INTO orders (customer_id, restaurant_id, branch_id, idempotency_key, request_hash,
                     fulfillment, delivery_address, table_number, payment_method, customer_note, total)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     (user['id'], data.restaurant_id, data.branch_id, key, request_hash, data.fulfillment,
                      data.delivery_address, data.table_number, data.payment_method, data.customer_note, total))
                 order_id = cursor.lastrowid
-                for product, quantity in items:
+                for product, quantity, additions in items:
                     cursor.execute('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (%s,%s,%s,%s,%s)',
                                    (order_id, product['id'], product['name'], product['price'], quantity))
+                    item_id = cursor.lastrowid
+                    for extra, amount in additions:
+                        cursor.execute('INSERT INTO order_item_additions (order_item_id,product_id,product_name,unit_price,quantity) VALUES (%s,%s,%s,%s,%s)',
+                                       (item_id, extra['id'], extra['name'], extra['price'], amount))
                 cursor.execute('SELECT * FROM orders WHERE id=%s', (order_id,))
                 order = cursor.fetchone()
             db.commit()
@@ -286,6 +309,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception:
             db.rollback()
             raise
+
+    @app.get('/mis-pedidos', response_model=list[OrderOutput])
+    def list_my_orders(user: User, db: DB, limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        _require_orders()
+        with db.cursor() as cursor:
+            cursor.execute('SELECT * FROM orders WHERE customer_id=%s ORDER BY id DESC LIMIT %s', (user['id'], limit))
+            return cursor.fetchall()
 
     @app.get('/pedidos/{order_id}', response_model=OrderOutput)
     def my_order(order_id: int, user: User, db: DB):
@@ -319,11 +349,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             orders = cursor.fetchall()
             if orders:
                 placeholders = ','.join(['%s'] * len(orders))
-                cursor.execute(f'SELECT order_id, product_name, quantity, unit_price FROM order_items WHERE order_id IN ({placeholders}) ORDER BY id',
+                cursor.execute(f'SELECT id, order_id, product_name, quantity, unit_price FROM order_items WHERE order_id IN ({placeholders}) ORDER BY id',
                                tuple(order['id'] for order in orders))
                 grouped = {order['id']: [] for order in orders}
-                for item in cursor.fetchall():
+                rows = cursor.fetchall()
+                item_groups = {item['id']: item for item in rows}
+                for item in rows:
+                    item['additions'] = []
                     grouped[item['order_id']].append(item)
+                if item_groups:
+                    marks = ','.join(['%s'] * len(item_groups))
+                    cursor.execute(f'SELECT order_item_id,product_name,quantity,unit_price FROM order_item_additions WHERE order_item_id IN ({marks}) ORDER BY id', tuple(item_groups))
+                    for addition in cursor.fetchall():
+                        item_groups[addition['order_item_id']]['additions'].append(addition)
                 for order in orders:
                     order['items'] = grouped[order['id']]
             return orders

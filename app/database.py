@@ -256,6 +256,16 @@ def init_orders(settings: Settings) -> None:
             cursor.execute("SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='orders' AND COLUMN_NAME='customer_note'")
             if cursor.fetchone()['n'] == 0:
                 cursor.execute('ALTER TABLE orders ADD COLUMN customer_note VARCHAR(500) NULL')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS order_item_additions (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                order_item_id BIGINT UNSIGNED NOT NULL,
+                product_id BIGINT UNSIGNED NOT NULL,
+                product_name VARCHAR(160) NOT NULL,
+                unit_price BIGINT UNSIGNED NOT NULL,
+                quantity SMALLINT UNSIGNED NOT NULL,
+                FOREIGN KEY (order_item_id) REFERENCES order_items(id),
+                FOREIGN KEY (product_id) REFERENCES menu_products(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
 
 
 def enable_customer_role(settings: Settings) -> None:

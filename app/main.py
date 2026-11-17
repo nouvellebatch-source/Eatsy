@@ -19,6 +19,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.middleware.cors import CORSMiddleware
+from starlette.staticfiles import StaticFiles
+from pathlib import Path as FilePath
 
 from app.config import Settings
 from app.database import connection
@@ -135,6 +137,40 @@ def _device_type(user_agent: str) -> str:
     return "desktop" if user_agent else "unknown"
 
 
+def _catalog_image_url(product: dict, request: Request) -> dict:
+    """Completa solo imágenes vacías con ilustraciones propias del menú Eatsy."""
+    if product.get("image_url"):
+        return product
+    name = (product.get("name") or "").casefold()
+    category = (product.get("category") or "").casefold()
+    if "boloñes" in name or "bolognes" in name:
+        asset = "bolognesa-generada.png"
+    elif "pizza" in category or "adiciones pizza" in category:
+        asset = "pizza-generada.png"
+    elif "almuerzo" in category:
+        asset = "almuerzo-generado.png"
+    elif "entrada" in category:
+        asset = "entrada-generada.png"
+    elif "pasta" in category or "lasgn" in category or "lasañ" in category:
+        asset = "pasta-generada.png"
+    elif "carn" in category or "grill" in category:
+        asset = "carne-generada.png"
+    elif "pescado" in category:
+        asset = "pescado-generado.png"
+    elif "sopa" in category:
+        asset = "sopa-generada.png"
+    elif "cerveza" in category:
+        asset = "cerveza-generada.png"
+    elif "postre" in category:
+        asset = "postre-generado.png"
+    elif "bebida" in category or "jugo" in category:
+        asset = "bebida-generada.png"
+    else:
+        return product
+    product["image_url"] = str(request.url_for("ilustraciones", path=asset))
+    return product
+
+
 def _write_request_log(request: Request, response: Response, elapsed_ms: float, request_id: str) -> None:
     """No geolocaliza IPs: solo almacena la ubicación que la app envía con consentimiento."""
     user_agent = request.headers.get("user-agent", "")[:1024] or None
@@ -160,6 +196,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         yield
 
     app = FastAPI(title="Eatsy API", description="API del sistema de restaurantes Eatsy", version="1.0.0", lifespan=lifespan)
+    app.mount('/ilustraciones', StaticFiles(directory=FilePath(__file__).parent / 'static' / 'ilustraciones'), name='ilustraciones')
     origins = settings.cors_origins if settings else tuple(origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip())
     app.add_middleware(CORSMiddleware, allow_origins=list(origins), allow_credentials=False,
                        allow_origin_regex=r'http://(?:localhost|127\.0\.0\.1):[0-9]{1,5}',
@@ -176,9 +213,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response = await call_next(request)
         # El catálogo es público; permitir su lectura desde navegadores sin
         # ampliar CORS de autenticación, usuarios, pedidos ni otros recursos.
-        if request.method == 'GET' and re.fullmatch(
+        if request.method == 'GET' and (request.url.path.startswith('/ilustraciones/') or re.fullmatch(
             r'/restaurantes(?:/[0-9]+/(?:sucursales(?:/[0-9]+/mesas)?|categorias|productos|promociones|eventos))?', request.url.path
-        ):
+        )):
             response.headers['Access-Control-Allow-Origin'] = '*'
         elapsed_ms = (time.perf_counter() - started) * 1000
         response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.3f}"
@@ -214,6 +251,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get('/restaurantes/{restaurant_id}/productos', response_model=list[MenuProductOutput])
     def restaurant_products(restaurant_id: int, db: DB,
+                            request: Request,
                             categoria: Annotated[str | None, Query(max_length=100)] = None,
                             limit: Annotated[int, Query(ge=1, le=100)] = 50,
                             offset: Annotated[int, Query(ge=0)] = 0):
@@ -222,7 +260,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 cursor.execute('SELECT p.id, p.restaurant_id, p.name, p.description, p.category, p.price, p.currency, p.image_url FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 AND p.category=%s ORDER BY p.name, p.id LIMIT %s OFFSET %s', (restaurant_id, categoria.strip(), limit, offset))
             else:
                 cursor.execute('SELECT p.id, p.restaurant_id, p.name, p.description, p.category, p.price, p.currency, p.image_url FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 ORDER BY p.name, p.id LIMIT %s OFFSET %s', (restaurant_id, limit, offset))
-            return cursor.fetchall()
+            return [_catalog_image_url(row, request) for row in cursor.fetchall()]
 
     @app.post('/pedidos', response_model=OrderOutput, status_code=201)
     def create_order(data: OrderInput, user: User, db: DB):

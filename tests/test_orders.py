@@ -51,6 +51,25 @@ class OrderTests(unittest.TestCase):
         insert = next(params for sql, params in db.c.calls if 'INSERT INTO orders' in sql)
         self.assertEqual(insert[-1], 50000)
 
+    @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
+    def test_kitchen_receives_order_items_only_after_membership_check(self):
+        class KitchenCursor(Cursor):
+            def fetchone(self):
+                return {'role': 'kitchen'} if 'restaurant_memberships' in self.sql else None
+            def fetchall(self):
+                if 'FROM orders' in self.sql:
+                    return [{'id': 7}]
+                if 'FROM order_items' in self.sql:
+                    return [{'order_id': 7, 'product_name': 'Pizza', 'quantity': 2, 'unit_price': 25000}]
+                return []
+        db = DB()
+        db.c = KitchenCursor()
+        app = create_app()
+        endpoint = next(r.endpoint for r in app.routes if r.path == '/gestion/restaurantes/{restaurant_id}/pedidos')
+        orders = endpoint(1, {'id': 8}, db, 50)
+        self.assertEqual(orders[0]['items'][0]['product_name'], 'Pizza')
+        self.assertEqual(db.c.calls[0][1], (1, 8))
+
     @patch.dict(os.environ, {'ORDERS_ENABLED': 'false'})
     def test_disabled_orders_fail_closed(self):
         with self.assertRaises(HTTPException) as error:

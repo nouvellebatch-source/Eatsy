@@ -25,7 +25,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
-from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput
+from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -161,10 +161,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app = FastAPI(title="Eatsy API", description="API del sistema de restaurantes Eatsy", version="1.0.0", lifespan=lifespan)
     origins = settings.cors_origins if settings else tuple(origin.strip() for origin in os.environ.get("CORS_ORIGINS", "").split(",") if origin.strip())
-    if origins:
-        app.add_middleware(CORSMiddleware, allow_origins=list(origins), allow_credentials=False,
-                           allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-                           allow_headers=["Authorization", "Content-Type", "X-Client-Country", "X-Client-City", "X-Client-Latitude", "X-Client-Longitude", "X-Device-Platform"])
+    app.add_middleware(CORSMiddleware, allow_origins=list(origins), allow_credentials=False,
+                       allow_origin_regex=r'http://(?:localhost|127\.0\.0\.1):[0-9]{1,5}',
+                       allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                       allow_headers=["Authorization", "Content-Type", "X-Client-Country", "X-Client-City", "X-Client-Latitude", "X-Client-Longitude", "X-Device-Platform"])
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError):
@@ -264,10 +264,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     items.append((product, item.quantity))
                 total = sum(product['price'] * quantity for product, quantity in items)
                 cursor.execute('''INSERT INTO orders (customer_id, restaurant_id, branch_id, idempotency_key, request_hash,
-                    fulfillment, delivery_address, table_number, payment_method, total)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    fulfillment, delivery_address, table_number, payment_method, customer_note, total)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
                     (user['id'], data.restaurant_id, data.branch_id, key, request_hash, data.fulfillment,
-                     data.delivery_address, data.table_number, data.payment_method, total))
+                     data.delivery_address, data.table_number, data.payment_method, data.customer_note, total))
                 order_id = cursor.lastrowid
                 for product, quantity in items:
                     cursor.execute('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (%s,%s,%s,%s,%s)',
@@ -307,7 +307,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cursor.execute('SELECT previous_status, new_status, created_at FROM order_events WHERE order_id=%s ORDER BY id', (order_id,))
             return cursor.fetchall()
 
-    @app.get('/gestion/restaurantes/{restaurant_id}/pedidos', response_model=list[OrderOutput])
+    @app.get('/gestion/restaurantes/{restaurant_id}/pedidos', response_model=list[KitchenOrderOutput])
     def restaurant_orders(restaurant_id: int, user: User, db: DB,
                           limit: Annotated[int, Query(ge=1, le=100)] = 50):
         _require_orders()
@@ -316,7 +316,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if not cursor.fetchone():
                 raise HTTPException(403, 'No tienes acceso a este restaurante.')
             cursor.execute('SELECT * FROM orders WHERE restaurant_id=%s ORDER BY id DESC LIMIT %s', (restaurant_id, limit))
-            return cursor.fetchall()
+            orders = cursor.fetchall()
+            if orders:
+                placeholders = ','.join(['%s'] * len(orders))
+                cursor.execute(f'SELECT order_id, product_name, quantity, unit_price FROM order_items WHERE order_id IN ({placeholders}) ORDER BY id',
+                               tuple(order['id'] for order in orders))
+                grouped = {order['id']: [] for order in orders}
+                for item in cursor.fetchall():
+                    grouped[item['order_id']].append(item)
+                for order in orders:
+                    order['items'] = grouped[order['id']]
+            return orders
 
     @app.patch('/gestion/restaurantes/{restaurant_id}/pedidos/{order_id}/estado', response_model=OrderOutput)
     def advance_kitchen_order(restaurant_id: int, order_id: int, data: OrderTransitionInput, user: User, db: DB):
@@ -326,7 +336,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         db.begin()
         try:
             with db.cursor() as cursor:
-                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen')", (restaurant_id, user['id']))
+                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen','cashier')", (restaurant_id, user['id']))
                 if not cursor.fetchone():
                     raise HTTPException(403, 'No tienes permiso para gestionar cocina.')
                 cursor.execute('SELECT * FROM orders WHERE id=%s AND restaurant_id=%s FOR UPDATE', (order_id, restaurant_id))

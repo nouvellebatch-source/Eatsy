@@ -73,6 +73,7 @@ SCHEMA_STATEMENTS = (
         delivery_address VARCHAR(255) NULL,
         table_number VARCHAR(30) NULL,
         payment_method VARCHAR(20) NOT NULL,
+        customer_note VARCHAR(500) NULL,
         payment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
         status VARCHAR(24) NOT NULL DEFAULT 'pending_acceptance',
         total BIGINT UNSIGNED NOT NULL,
@@ -244,6 +245,17 @@ def init_catalog(settings: Settings) -> None:
         with db.cursor() as cursor:
             for statement in SCHEMA_STATEMENTS[:3]:
                 cursor.execute(statement)
+
+
+def init_orders(settings: Settings) -> None:
+    """Crea las tablas de pedidos, líneas, roles y eventos sin alterar las existentes."""
+    with connection(settings) as db:
+        with db.cursor() as cursor:
+            for statement in SCHEMA_STATEMENTS[4:8]:
+                cursor.execute(statement)
+            cursor.execute("SELECT COUNT(*) AS n FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='orders' AND COLUMN_NAME='customer_note'")
+            if cursor.fetchone()['n'] == 0:
+                cursor.execute('ALTER TABLE orders ADD COLUMN customer_note VARCHAR(500) NULL')
 
 
 def enable_customer_role(settings: Settings) -> None:

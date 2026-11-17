@@ -25,10 +25,21 @@ class RestaurantCatalogTests(unittest.TestCase):
             client = TestClient(app)
             for path in ('/restaurantes', '/restaurantes/1/categorias',
                          '/restaurantes/1/productos', '/restaurantes/1/sucursales'):
-                response = client.get(path, headers={'Origin': 'http://localhost:53000'})
+                response = client.get(path, headers={'Origin': 'https://example.invalid'})
                 self.assertEqual(response.headers.get('access-control-allow-origin'), '*')
-            response = client.get('/health', headers={'Origin': 'http://localhost:53000'})
+            response = client.get('/health', headers={'Origin': 'https://example.invalid'})
             self.assertNotIn('access-control-allow-origin', response.headers)
+
+    def test_local_browser_can_send_orders_but_unknown_sites_cannot(self):
+        app = create_app()
+        with patch('app.main._write_request_log'):
+            client = TestClient(app)
+            for method in ('POST', 'PATCH'):
+                headers = {'Origin': 'http://localhost:53000', 'Access-Control-Request-Method': method,
+                           'Access-Control-Request-Headers': 'authorization,content-type'}
+                self.assertEqual(client.options('/pedidos', headers=headers).status_code, 200)
+                headers['Origin'] = 'https://example.invalid'
+                self.assertEqual(client.options('/pedidos', headers=headers).status_code, 400)
 
     def test_categories_are_scoped_to_available_products(self):
         app = create_app()

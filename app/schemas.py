@@ -126,6 +126,7 @@ class OrderInput(BaseModel):
     delivery_address: str | None = Field(default=None, max_length=255)
     table_number: str | None = Field(default=None, max_length=30)
     payment_method: Literal['cash']
+    customer_note: str | None = Field(default=None, max_length=500)
     items: list[OrderItemInput] = Field(min_length=1, max_length=50)
 
     @model_validator(mode='after')
@@ -149,6 +150,19 @@ class OrderOutput(BaseModel):
     status: str
     total: int
     currency: str
+
+
+class KitchenOrderItem(BaseModel):
+    product_name: str
+    quantity: int
+    unit_price: int
+
+
+class KitchenOrderOutput(OrderOutput):
+    table_number: str | None
+    customer_note: str | None
+    created_at: datetime
+    items: list[KitchenOrderItem]
 
 
 class OrderTransitionInput(BaseModel):

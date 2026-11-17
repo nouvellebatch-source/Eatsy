@@ -215,6 +215,7 @@ def connection(settings: Settings):
         password=settings.db_password,
         database=settings.db_name,
         charset="utf8mb4",
+        init_command="SET time_zone = '+00:00'",
         cursorclass=pymysql.cursors.DictCursor,
         autocommit=True,
         connect_timeout=settings.db_connect_timeout,
@@ -239,6 +240,7 @@ def init_db(settings: Settings) -> None:
                 cursor.execute(statement)
     init_orders(settings)
     init_tables(settings)
+    init_commercial(settings)
 
 
 def init_catalog(settings: Settings) -> None:
@@ -309,6 +311,49 @@ def init_tables(settings: Settings) -> None:
                 confirmed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (order_id) REFERENCES orders(id),
                 FOREIGN KEY (actor_id) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+
+
+def init_commercial(settings: Settings) -> None:
+    with connection(settings) as db:
+        with db.cursor() as cursor:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS restaurant_promotions (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                restaurant_id BIGINT UNSIGNED NOT NULL,
+                code VARCHAR(40) NOT NULL,
+                title VARCHAR(120) NOT NULL,
+                percent_off SMALLINT UNSIGNED NOT NULL,
+                starts_at DATETIME NOT NULL,
+                ends_at DATETIME NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_by BIGINT UNSIGNED NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE KEY uq_promotion_code (restaurant_id,code),
+                FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+                FOREIGN KEY (created_by) REFERENCES users(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS order_discounts (
+                order_id BIGINT UNSIGNED PRIMARY KEY,
+                promotion_id BIGINT UNSIGNED NOT NULL,
+                code VARCHAR(40) NOT NULL,
+                percent_off SMALLINT UNSIGNED NOT NULL,
+                subtotal BIGINT UNSIGNED NOT NULL,
+                discount BIGINT UNSIGNED NOT NULL,
+                FOREIGN KEY (order_id) REFERENCES orders(id),
+                FOREIGN KEY (promotion_id) REFERENCES restaurant_promotions(id)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS restaurant_events (
+                id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                restaurant_id BIGINT UNSIGNED NOT NULL,
+                title VARCHAR(120) NOT NULL,
+                description VARCHAR(500) NOT NULL,
+                starts_at DATETIME NOT NULL,
+                ends_at DATETIME NOT NULL,
+                active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_by BIGINT UNSIGNED NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+                FOREIGN KEY (created_by) REFERENCES users(id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4''')
 
 

@@ -5,7 +5,7 @@ import getpass
 import pymysql
 
 from app.config import Settings
-from app.database import connection, enable_customer_role, init_catalog, init_db, init_orders, init_tables
+from app.database import connection, enable_customer_role, init_catalog, init_db, init_orders, init_tables, init_commercial
 from app.security import password_hasher
 
 
@@ -73,6 +73,7 @@ def main() -> None:
     commands.add_parser("check-db", help="Comprueba la conexión y las tablas principales.")
     commands.add_parser("init-catalog", help="Crea las tablas de restaurantes, sucursales y menús.")
     commands.add_parser("init-orders", help="Crea las tablas de pedidos y comanda.")
+    commands.add_parser('init-commercial', help='Crea tablas de promociones y descuentos.')
     tables = commands.add_parser('seed-tables', help='Crea el mapa inicial de 15 mesas sin reemplazar mesas existentes.')
     tables.add_argument('--restaurante', required=True)
     tables.add_argument('--sucursal', required=True, type=int)
@@ -101,6 +102,9 @@ def main() -> None:
         elif args.command == "init-orders":
             init_orders(settings)
             print("Tablas de pedidos y comanda inicializadas.")
+        elif args.command == 'init-commercial':
+            init_commercial(settings)
+            print('Tablas de promociones inicializadas.')
         elif args.command == 'seed-tables':
             init_tables(settings)
             with connection(settings) as db:

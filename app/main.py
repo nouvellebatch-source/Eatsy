@@ -25,7 +25,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
-from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput, CustomerReservationInput
+from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput, CustomerReservationInput, PromotionInput, PromotionOutput, RestaurantEventInput, RestaurantEventOutput
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -177,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # El catálogo es público; permitir su lectura desde navegadores sin
         # ampliar CORS de autenticación, usuarios, pedidos ni otros recursos.
         if request.method == 'GET' and re.fullmatch(
-            r'/restaurantes(?:/[0-9]+/(?:sucursales(?:/[0-9]+/mesas)?|categorias|productos))?', request.url.path
+            r'/restaurantes(?:/[0-9]+/(?:sucursales(?:/[0-9]+/mesas)?|categorias|productos|promociones|eventos))?', request.url.path
         ):
             response.headers['Access-Control-Allow-Origin'] = '*'
         elapsed_ms = (time.perf_counter() - started) * 1000
@@ -232,6 +232,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if user['rol'] != 'customer':
             raise HTTPException(403, 'Se necesita una cuenta de cliente.')
         payload = data.model_dump(mode='json', exclude={'idempotency_key'})
+        if payload.get('discount_code') is None:
+            payload.pop('discount_code', None)
         request_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         key = str(data.idempotency_key)
 
@@ -296,12 +298,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     items.append((product, item.quantity, additions))
                 total = sum((product['price'] + sum(extra['price'] * amount for extra, amount in additions)) * quantity
                             for product, quantity, additions in items)
+                discount = 0
+                promotion = None
+                subtotal = total
+                if data.discount_code:
+                    cursor.execute('''SELECT id,code,percent_off FROM restaurant_promotions
+                        WHERE restaurant_id=%s AND code=%s AND active=1 AND starts_at<=UTC_TIMESTAMP() AND ends_at>UTC_TIMESTAMP() FOR UPDATE''',
+                        (data.restaurant_id,data.discount_code.strip().upper()))
+                    promotion = cursor.fetchone()
+                    if not promotion: raise HTTPException(409, 'El código no está disponible o ha vencido.')
+                    discount = subtotal * promotion['percent_off'] // 100
+                    total = subtotal - discount
                 cursor.execute('''INSERT INTO orders (customer_id, restaurant_id, branch_id, idempotency_key, request_hash,
                     fulfillment, delivery_address, table_number, payment_method, customer_note, status, total)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s)''',
                     (user['id'], data.restaurant_id, data.branch_id, key, request_hash, data.fulfillment,
                      data.delivery_address, data.table_number, data.payment_method, data.customer_note, total))
                 order_id = cursor.lastrowid
+                if promotion:
+                    cursor.execute('INSERT INTO order_discounts (order_id,promotion_id,code,percent_off,subtotal,discount) VALUES (%s,%s,%s,%s,%s,%s)',
+                                   (order_id,promotion['id'],promotion['code'],promotion['percent_off'],subtotal,discount))
                 for product, quantity, additions in items:
                     cursor.execute('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (%s,%s,%s,%s,%s)',
                                    (order_id, product['id'], product['name'], product['price'], quantity))
@@ -350,6 +366,100 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(404, 'Pedido no encontrado.')
             cursor.execute('SELECT previous_status, new_status, created_at FROM order_events WHERE order_id=%s ORDER BY id', (order_id,))
             return cursor.fetchall()
+
+    @app.get('/restaurantes/{restaurant_id}/promociones', response_model=list[PromotionOutput])
+    def public_promotions(restaurant_id: int, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('''SELECT p.id,p.code,p.title,p.percent_off,p.starts_at,p.ends_at,p.active
+                FROM restaurant_promotions p JOIN restaurants r ON r.id=p.restaurant_id AND r.active=1
+                WHERE p.restaurant_id=%s AND p.active=1 AND p.starts_at<=UTC_TIMESTAMP() AND p.ends_at>UTC_TIMESTAMP() ORDER BY p.ends_at,p.id''', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/promociones', response_model=list[PromotionOutput])
+    def manage_promotions(restaurant_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede gestionar promociones.')
+            cursor.execute('SELECT id,code,title,percent_off,starts_at,ends_at,active FROM restaurant_promotions WHERE restaurant_id=%s ORDER BY id DESC LIMIT 100', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/promociones', response_model=PromotionOutput, status_code=201)
+    def create_promotion(restaurant_id: int, data: PromotionInput, user: User, db: DB):
+        starts=data.starts_at.astimezone(timezone.utc).replace(tzinfo=None)
+        ends=data.ends_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if ends <= datetime.now(timezone.utc).replace(tzinfo=None): raise HTTPException(422, 'La promoción debe terminar en el futuro.')
+        try:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+                if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede crear promociones.')
+                cursor.execute('INSERT INTO restaurant_promotions (restaurant_id,code,title,percent_off,starts_at,ends_at,created_by) VALUES (%s,%s,%s,%s,%s,%s,%s)',
+                    (restaurant_id,data.code.upper(),data.title,data.percent_off,starts,ends,user['id']))
+                return {'id':cursor.lastrowid,'code':data.code.upper(),'title':data.title,'percent_off':data.percent_off,'starts_at':starts,'ends_at':ends,'active':True}
+        except pymysql.IntegrityError as error:
+            if error.args and error.args[0]==1062: raise HTTPException(409, 'Ya existe ese código para este restaurante.') from None
+            raise
+
+    @app.patch('/gestion/restaurantes/{restaurant_id}/promociones/{promotion_id}/desactivar', status_code=204)
+    def disable_promotion(restaurant_id: int, promotion_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede gestionar promociones.')
+            cursor.execute('UPDATE restaurant_promotions SET active=0 WHERE id=%s AND restaurant_id=%s AND active=1', (promotion_id,restaurant_id))
+            if not cursor.rowcount: raise HTTPException(404, 'Promoción activa no encontrada.')
+        return Response(status_code=204)
+
+    @app.get('/restaurantes/{restaurant_id}/eventos', response_model=list[RestaurantEventOutput])
+    def public_events(restaurant_id: int, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('''SELECT e.id,e.title,e.description,e.starts_at,e.ends_at,e.active FROM restaurant_events e
+                JOIN restaurants r ON r.id=e.restaurant_id AND r.active=1 WHERE e.restaurant_id=%s AND e.active=1 AND e.ends_at>UTC_TIMESTAMP() ORDER BY e.starts_at LIMIT 100''', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/eventos', response_model=list[RestaurantEventOutput])
+    def manage_events(restaurant_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede gestionar eventos.')
+            cursor.execute('SELECT id,title,description,starts_at,ends_at,active FROM restaurant_events WHERE restaurant_id=%s ORDER BY starts_at DESC LIMIT 100', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/eventos', response_model=RestaurantEventOutput, status_code=201)
+    def create_event(restaurant_id: int, data: RestaurantEventInput, user: User, db: DB):
+        starts=data.starts_at.astimezone(timezone.utc).replace(tzinfo=None)
+        ends=data.ends_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if ends <= datetime.now(timezone.utc).replace(tzinfo=None): raise HTTPException(422, 'El evento debe terminar en el futuro.')
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede crear eventos.')
+            cursor.execute('INSERT INTO restaurant_events (restaurant_id,title,description,starts_at,ends_at,created_by) VALUES (%s,%s,%s,%s,%s,%s)',
+                (restaurant_id,data.title,data.description,starts,ends,user['id']))
+            return {'id':cursor.lastrowid,'title':data.title,'description':data.description,'starts_at':starts,'ends_at':ends,'active':True}
+
+    @app.patch('/gestion/restaurantes/{restaurant_id}/eventos/{event_id}/desactivar', status_code=204)
+    def disable_event(restaurant_id: int, event_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede gestionar eventos.')
+            cursor.execute('UPDATE restaurant_events SET active=0 WHERE id=%s AND restaurant_id=%s AND active=1', (event_id,restaurant_id))
+            if not cursor.rowcount: raise HTTPException(404, 'Evento activo no encontrado.')
+        return Response(status_code=204)
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/finanzas')
+    def restaurant_finances(restaurant_id: int, user: User, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id,user['id']))
+            if not cursor.fetchone(): raise HTTPException(403, 'Solo el gerente puede consultar finanzas.')
+            cursor.execute('''SELECT COUNT(*) AS paid_count,COALESCE(SUM(o.total),0) AS revenue
+                FROM payment_confirmations p JOIN orders o ON o.id=p.order_id
+                WHERE o.restaurant_id=%s AND o.payment_method='cash' AND o.payment_status='paid' ''', (restaurant_id,))
+            summary=cursor.fetchone()
+            cursor.execute('''SELECT DATE(DATE_SUB(p.confirmed_at,INTERVAL 5 HOUR)) AS day,
+                COUNT(*) AS payments,COALESCE(SUM(o.total),0) AS revenue
+                FROM payment_confirmations p JOIN orders o ON o.id=p.order_id
+                WHERE o.restaurant_id=%s AND o.payment_method='cash' AND o.payment_status='paid'
+                GROUP BY DATE(DATE_SUB(p.confirmed_at,INTERVAL 5 HOUR)) ORDER BY day DESC LIMIT 30''', (restaurant_id,))
+            return {'currency':'COP','paid_count':summary['paid_count'],'revenue':int(summary['revenue']),
+                'days':[{'day':str(row['day']),'payments':row['payments'],'revenue':int(row['revenue'])} for row in cursor.fetchall()]}
 
     @app.get('/restaurantes/{restaurant_id}/sucursales/{branch_id}/mesas', response_model=list[PublicTableOutput])
     def public_tables(restaurant_id: int, branch_id: int, db: DB):
@@ -488,7 +598,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen','cashier')", (restaurant_id, user['id']))
             if not cursor.fetchone():
                 raise HTTPException(403, 'No tienes acceso a este restaurante.')
-            cursor.execute('SELECT * FROM orders WHERE restaurant_id=%s ORDER BY id DESC LIMIT %s', (restaurant_id, limit))
+            cursor.execute('''SELECT o.*,d.code AS discount_code,COALESCE(d.discount,0) AS discount_amount,d.subtotal
+                FROM orders o LEFT JOIN order_discounts d ON d.order_id=o.id
+                WHERE o.restaurant_id=%s ORDER BY o.id DESC LIMIT %s''', (restaurant_id, limit))
             orders = cursor.fetchall()
             if orders:
                 placeholders = ','.join(['%s'] * len(orders))

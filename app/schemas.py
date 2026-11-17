@@ -140,6 +140,7 @@ class OrderInput(BaseModel):
     table_number: str | None = Field(default=None, max_length=30)
     payment_method: Literal['cash']
     customer_note: str | None = Field(default=None, max_length=500)
+    discount_code: str | None = Field(default=None, min_length=1, max_length=40)
     items: list[OrderItemInput] = Field(min_length=1, max_length=50)
 
     @model_validator(mode='after')
@@ -213,6 +214,54 @@ class ReservationOutput(BaseModel):
     status: str
 
 
+class PromotionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    code: str = Field(min_length=1, max_length=40, pattern=r'^[A-Za-z0-9_-]+$')
+    title: str = Field(min_length=1, max_length=120)
+    percent_off: int = Field(ge=1, le=100, strict=True)
+    starts_at: datetime
+    ends_at: datetime
+
+    @model_validator(mode='after')
+    def valid_times(self):
+        if self.starts_at.utcoffset() is None or self.ends_at.utcoffset() is None or self.ends_at <= self.starts_at:
+            raise ValueError('Ingresa un intervalo válido con zona horaria.')
+        return self
+
+
+class PromotionOutput(BaseModel):
+    id: int
+    code: str
+    title: str
+    percent_off: int
+    starts_at: datetime
+    ends_at: datetime
+    active: bool
+
+
+class RestaurantEventInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=120)
+    description: str = Field(min_length=1, max_length=500)
+    starts_at: datetime
+    ends_at: datetime
+
+    @model_validator(mode='after')
+    def valid_times(self):
+        if self.starts_at.utcoffset() is None or self.ends_at.utcoffset() is None or self.ends_at <= self.starts_at:
+            raise ValueError('Ingresa un intervalo válido con zona horaria.')
+        return self
+
+
+class RestaurantEventOutput(BaseModel):
+    id: int
+    title: str
+    description: str
+    starts_at: datetime
+    ends_at: datetime
+    active: bool
+
+
 class CustomerReservationInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     table_id: int = Field(gt=0)
@@ -247,6 +296,9 @@ class KitchenOrderOutput(OrderOutput):
     customer_note: str | None
     created_at: datetime
     items: list[KitchenOrderItem]
+    discount_code: str | None = None
+    discount_amount: int = 0
+    subtotal: int | None = None
 
 
 class OrderTransitionInput(BaseModel):

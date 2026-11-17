@@ -1,6 +1,7 @@
 """API Eatsy preparada para MySQL en Aiven y despliegue en Render."""
 from contextlib import asynccontextmanager
 import os
+import re
 import hashlib
 import hmac
 import json
@@ -173,6 +174,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def audit_response(request: Request, call_next):
         started, request_id = time.perf_counter(), str(uuid4())
         response = await call_next(request)
+        # El catálogo es público; permitir su lectura desde navegadores sin
+        # ampliar CORS de autenticación, usuarios, pedidos ni otros recursos.
+        if request.method == 'GET' and re.fullmatch(
+            r'/restaurantes(?:/[0-9]+/(?:sucursales|categorias|productos))?', request.url.path
+        ):
+            response.headers['Access-Control-Allow-Origin'] = '*'
         elapsed_ms = (time.perf_counter() - started) * 1000
         response.headers["X-Process-Time-Ms"] = f"{elapsed_ms:.3f}"
         response.headers["X-Request-ID"] = request_id

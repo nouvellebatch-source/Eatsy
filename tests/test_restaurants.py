@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import patch
+from fastapi.testclient import TestClient
 
-from app.main import create_app
+from app.main import create_app, get_db
 
 
 class Cursor:
@@ -16,6 +18,18 @@ class Database:
 
 
 class RestaurantCatalogTests(unittest.TestCase):
+    def test_public_catalog_allows_browser_access_without_opening_other_routes(self):
+        app = create_app()
+        app.dependency_overrides[get_db] = lambda: Database()
+        with patch('app.main._write_request_log'):
+            client = TestClient(app)
+            for path in ('/restaurantes', '/restaurantes/1/categorias',
+                         '/restaurantes/1/productos', '/restaurantes/1/sucursales'):
+                response = client.get(path, headers={'Origin': 'http://localhost:53000'})
+                self.assertEqual(response.headers.get('access-control-allow-origin'), '*')
+            response = client.get('/health', headers={'Origin': 'http://localhost:53000'})
+            self.assertNotIn('access-control-allow-origin', response.headers)
+
     def test_categories_are_scoped_to_available_products(self):
         app = create_app()
         endpoint = next(r.endpoint for r in app.routes if r.path == '/restaurantes/{restaurant_id}/categorias')

@@ -272,6 +272,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     additions = []
                     for addition in item.additions:
                         extra = products[addition.product_id]
+                        extra_category = extra['category'].lower()
+                        is_drink = extra_category in {'bebidas', 'jugos naturales', 'cervezas artesanales', 'cervezas importadas', 'cervezas nacionales'}
+                        if is_drink:
+                            if product['category'].lower() in {'bebidas', 'jugos naturales', 'cervezas artesanales', 'cervezas importadas', 'cervezas nacionales'}:
+                                raise HTTPException(422, 'La bebida debe acompañar un plato.')
+                            additions.append((extra, addition.quantity))
+                            continue
                         size = re.search(r'\((Personal|Small|Medium|Large)\)$', product['name'], re.I)
                         extra_size = re.search(r'\((Personal|Small|Medium|Large)\)$', extra['name'], re.I)
                         if (not product['category'].lower().startswith('pizzas') or

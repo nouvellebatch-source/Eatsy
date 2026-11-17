@@ -82,6 +82,21 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 422)
 
     @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
+    def test_beer_is_linked_to_a_meal_and_charged_per_meal(self):
+        class DrinkCursor(Cursor):
+            def fetchone(self):
+                if 'menu_products' in self.sql:
+                    return {3: {'id': 3, 'name': 'Bandeja', 'category': 'Almuerzos', 'price': 20000, 'currency': 'COP'},
+                            4: {'id': 4, 'name': 'Cerveza', 'category': 'Cervezas Artesanales', 'price': 5000, 'currency': 'COP'}}.get(self.calls[-1][1][0])
+                return super().fetchone()
+        db = DB(); db.c = DrinkCursor()
+        data = self.data.model_copy(update={'items': [self.data.items[0].model_copy(update={'additions': [OrderAdditionInput(product_id=4)]})]})
+        self.endpoint(data, {'id': 4, 'rol': 'customer'}, db)
+        insert = next(params for sql, params in db.c.calls if 'INSERT INTO orders' in sql)
+        self.assertEqual(insert[-1], 50000)
+        self.assertTrue(any('INSERT INTO order_item_additions' in sql for sql, _ in db.c.calls))
+
+    @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
     def test_kitchen_receives_order_items_only_after_membership_check(self):
         class KitchenCursor(Cursor):
             def fetchone(self):

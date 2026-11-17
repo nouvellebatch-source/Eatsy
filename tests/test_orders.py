@@ -50,6 +50,7 @@ class OrderTests(unittest.TestCase):
         self.assertTrue(db.committed)
         insert = next(params for sql, params in db.c.calls if 'INSERT INTO orders' in sql)
         self.assertEqual(insert[-1], 50000)
+        self.assertTrue(any("'confirmed'" in sql for sql, _ in db.c.calls if 'INSERT INTO orders' in sql))
 
     @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
     def test_pizza_addition_price_and_link_are_saved(self):

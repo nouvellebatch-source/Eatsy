@@ -290,8 +290,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 total = sum((product['price'] + sum(extra['price'] * amount for extra, amount in additions)) * quantity
                             for product, quantity, additions in items)
                 cursor.execute('''INSERT INTO orders (customer_id, restaurant_id, branch_id, idempotency_key, request_hash,
-                    fulfillment, delivery_address, table_number, payment_method, customer_note, total)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    fulfillment, delivery_address, table_number, payment_method, customer_note, status, total)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'confirmed',%s)''',
                     (user['id'], data.restaurant_id, data.branch_id, key, request_hash, data.fulfillment,
                      data.delivery_address, data.table_number, data.payment_method, data.customer_note, total))
                 order_id = cursor.lastrowid

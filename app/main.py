@@ -372,7 +372,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 COALESCE(summary.active_orders,0) AS active_orders,
                 COALESCE(summary.total_orders,0) AS total_orders,
                 COALESCE(summary.total_paid,0) AS total_paid,
-                summary.customer_names
+                summary.customer_names, reservation.customer_name AS reservation_name
                 FROM restaurant_tables t JOIN restaurant_branches b ON b.id=t.branch_id AND b.restaurant_id=t.restaurant_id AND b.active=1
                 LEFT JOIN (SELECT o3.restaurant_id,o3.branch_id,o3.table_number,
                     COUNT(*) AS active_orders, SUM(o3.total) AS total_orders,
@@ -387,6 +387,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     AND o2.fulfillment='dine_in' AND o2.table_number=CAST(t.table_number AS CHAR)
                     AND o2.status IN ('pending_acceptance','confirmed','preparing','cooked','ready'))
                 LEFT JOIN users u ON u.id=o.customer_id
+                LEFT JOIN reservations reservation ON reservation.id=(SELECT MAX(r2.id) FROM reservations r2
+                    WHERE r2.table_id=t.id AND r2.restaurant_id=t.restaurant_id AND r2.status='confirmed'
+                    AND r2.starts_at<=UTC_TIMESTAMP() AND r2.ends_at>UTC_TIMESTAMP())
                 WHERE t.restaurant_id=%s ORDER BY b.name,t.table_number''', (restaurant_id,restaurant_id))
             return cursor.fetchall()
 

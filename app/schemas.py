@@ -176,6 +176,7 @@ class RestaurantTableOutput(BaseModel):
     active_orders: int = 0
     total_orders: int = 0
     total_paid: int = 0
+    reservation_name: str | None = None
 
 
 class PublicTableOutput(BaseModel):

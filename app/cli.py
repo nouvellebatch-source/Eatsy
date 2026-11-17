@@ -5,7 +5,7 @@ import getpass
 import pymysql
 
 from app.config import Settings
-from app.database import connection, enable_customer_role, init_db
+from app.database import connection, enable_customer_role, init_catalog, init_db
 from app.security import password_hasher
 
 
@@ -30,6 +30,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("init", aliases=["init-db", "cli-init"], help="Crea las tablas MySQL requeridas.")
     commands.add_parser("check-db", help="Comprueba la conexión y las tablas principales.")
+    commands.add_parser("init-catalog", help="Crea las tablas de restaurantes, sucursales y menús.")
     commands.add_parser("migrate-customers", help="Habilita el rol de cliente y crea tablas de verificación.")
     create = commands.add_parser("create-user", help="Crea un usuario desde terminal.")
     create.add_argument("--usuario", required=True)
@@ -42,6 +43,9 @@ def main() -> None:
         if args.command in {"init", "init-db", "cli-init"}:
             init_db(settings)
             print("Esquema MySQL de Eatsy inicializado.")
+        elif args.command == "init-catalog":
+            init_catalog(settings)
+            print("Tablas de catálogo inicializadas.")
         elif args.command == "migrate-customers":
             init_db(settings)
             enable_customer_role(settings)

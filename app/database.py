@@ -8,6 +8,45 @@ from app.config import Settings
 
 SCHEMA_STATEMENTS = (
     """
+    CREATE TABLE IF NOT EXISTS restaurants (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(160) NOT NULL,
+        slug VARCHAR(160) NOT NULL UNIQUE,
+        description TEXT NULL,
+        image_url VARCHAR(2048) NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS restaurant_branches (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        restaurant_id BIGINT UNSIGNED NOT NULL,
+        name VARCHAR(160) NOT NULL,
+        address VARCHAR(255) NOT NULL,
+        city VARCHAR(120) NOT NULL,
+        latitude DECIMAL(10,7) NULL,
+        longitude DECIMAL(10,7) NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        CONSTRAINT fk_branch_restaurant FOREIGN KEY (restaurant_id) REFERENCES restaurants(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS menu_products (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        restaurant_id BIGINT UNSIGNED NOT NULL,
+        name VARCHAR(160) NOT NULL,
+        description TEXT NULL,
+        category VARCHAR(100) NOT NULL,
+        price BIGINT UNSIGNED NOT NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'COP',
+        image_url VARCHAR(2048) NULL,
+        available BOOLEAN NOT NULL DEFAULT TRUE,
+        source_url VARCHAR(2048) NULL,
+        INDEX idx_menu_restaurant_category (restaurant_id, category),
+        CONSTRAINT fk_menu_restaurant FOREIGN KEY (restaurant_id) REFERENCES restaurants(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
     CREATE TABLE IF NOT EXISTS users (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         usuario VARCHAR(80) NOT NULL UNIQUE,
@@ -20,6 +59,66 @@ SCHEMA_STATEMENTS = (
         updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
         CONSTRAINT chk_users_role CHECK (rol IN ('admin', 'staff', 'customer')),
         CONSTRAINT chk_users_active CHECK (activo IN (0, 1))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS orders (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        customer_id BIGINT UNSIGNED NOT NULL,
+        restaurant_id BIGINT UNSIGNED NOT NULL,
+        branch_id BIGINT UNSIGNED NOT NULL,
+        idempotency_key CHAR(36) NOT NULL,
+        request_hash CHAR(64) NOT NULL,
+        fulfillment VARCHAR(16) NOT NULL,
+        delivery_address VARCHAR(255) NULL,
+        table_number VARCHAR(30) NULL,
+        payment_method VARCHAR(20) NOT NULL,
+        payment_status VARCHAR(20) NOT NULL DEFAULT 'pending',
+        status VARCHAR(24) NOT NULL DEFAULT 'pending_acceptance',
+        total BIGINT UNSIGNED NOT NULL,
+        currency CHAR(3) NOT NULL DEFAULT 'COP',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_order_idempotency (customer_id, idempotency_key),
+        CONSTRAINT fk_order_customer FOREIGN KEY (customer_id) REFERENCES users(id),
+        CONSTRAINT fk_order_restaurant FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+        CONSTRAINT fk_order_branch FOREIGN KEY (branch_id) REFERENCES restaurant_branches(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS order_items (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        order_id BIGINT UNSIGNED NOT NULL,
+        product_id BIGINT UNSIGNED NOT NULL,
+        product_name VARCHAR(160) NOT NULL,
+        unit_price BIGINT UNSIGNED NOT NULL,
+        quantity SMALLINT UNSIGNED NOT NULL,
+        CONSTRAINT fk_order_item_order FOREIGN KEY (order_id) REFERENCES orders(id),
+        CONSTRAINT fk_order_item_product FOREIGN KEY (product_id) REFERENCES menu_products(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS restaurant_memberships (
+        restaurant_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        role VARCHAR(20) NOT NULL,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        PRIMARY KEY (restaurant_id, user_id),
+        CONSTRAINT fk_membership_restaurant FOREIGN KEY (restaurant_id) REFERENCES restaurants(id),
+        CONSTRAINT fk_membership_user FOREIGN KEY (user_id) REFERENCES users(id),
+        CONSTRAINT chk_membership_role CHECK (role IN ('owner', 'kitchen', 'cashier', 'courier'))
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS order_events (
+        id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+        order_id BIGINT UNSIGNED NOT NULL,
+        actor_id BIGINT UNSIGNED NOT NULL,
+        previous_status VARCHAR(24) NOT NULL,
+        new_status VARCHAR(24) NOT NULL,
+        created_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+        INDEX idx_order_events_order (order_id, id),
+        CONSTRAINT fk_order_event_order FOREIGN KEY (order_id) REFERENCES orders(id),
+        CONSTRAINT fk_order_event_actor FOREIGN KEY (actor_id) REFERENCES users(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """,
     """
@@ -136,6 +235,14 @@ def init_db(settings: Settings) -> None:
     with connection(settings) as db:
         with db.cursor() as cursor:
             for statement in SCHEMA_STATEMENTS:
+                cursor.execute(statement)
+
+
+def init_catalog(settings: Settings) -> None:
+    """Crea solo las tres tablas nuevas de catálogo, sin modificar datos existentes."""
+    with connection(settings) as db:
+        with db.cursor() as cursor:
+            for statement in SCHEMA_STATEMENTS[:3]:
                 cursor.execute(statement)
 
 

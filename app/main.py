@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 import os
 import hashlib
 import hmac
+import json
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
+from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -36,6 +38,11 @@ def _email_verification_enabled() -> bool:
 def _require_email_verification() -> None:
     if not _email_verification_enabled():
         raise HTTPException(503, 'El registro y la verificación por correo aún no están disponibles.')
+
+
+def _require_orders() -> None:
+    if os.environ.get('ORDERS_ENABLED', 'false').strip().lower() != 'true':
+        raise HTTPException(503, 'Los pedidos aún no están habilitados.')
 
 
 def _code_digest(secret: str, email: str, code: str) -> str:
@@ -178,6 +185,155 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     def health():
         return {"status": "ok"}
+
+    @app.get('/restaurantes', response_model=list[RestaurantOutput])
+    def restaurants(db: DB, limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                    offset: Annotated[int, Query(ge=0)] = 0):
+        with db.cursor() as cursor:
+            cursor.execute('SELECT id, name, slug, description, image_url FROM restaurants WHERE active=1 ORDER BY name, id LIMIT %s OFFSET %s', (limit, offset))
+            return cursor.fetchall()
+
+    @app.get('/restaurantes/{restaurant_id}/sucursales', response_model=list[BranchOutput])
+    def branches(restaurant_id: int, db: DB):
+        with db.cursor() as cursor:
+            cursor.execute('SELECT b.id, b.restaurant_id, b.name, b.address, b.city, b.latitude, b.longitude FROM restaurant_branches b JOIN restaurants r ON r.id=b.restaurant_id WHERE b.restaurant_id=%s AND b.active=1 AND r.active=1 ORDER BY b.name, b.id', (restaurant_id,))
+            return cursor.fetchall()
+
+    @app.get('/restaurantes/{restaurant_id}/productos', response_model=list[MenuProductOutput])
+    def restaurant_products(restaurant_id: int, db: DB,
+                            categoria: Annotated[str | None, Query(max_length=100)] = None,
+                            limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                            offset: Annotated[int, Query(ge=0)] = 0):
+        with db.cursor() as cursor:
+            if categoria and categoria.strip():
+                cursor.execute('SELECT p.id, p.restaurant_id, p.name, p.description, p.category, p.price, p.currency, p.image_url FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 AND p.category=%s ORDER BY p.name, p.id LIMIT %s OFFSET %s', (restaurant_id, categoria.strip(), limit, offset))
+            else:
+                cursor.execute('SELECT p.id, p.restaurant_id, p.name, p.description, p.category, p.price, p.currency, p.image_url FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 ORDER BY p.name, p.id LIMIT %s OFFSET %s', (restaurant_id, limit, offset))
+            return cursor.fetchall()
+
+    @app.post('/pedidos', response_model=OrderOutput, status_code=201)
+    def create_order(data: OrderInput, user: User, db: DB):
+        _require_orders()
+        if data.fulfillment == 'delivery':
+            raise HTTPException(503, 'El cálculo de domicilio aún no está disponible.')
+        if user['rol'] != 'customer':
+            raise HTTPException(403, 'Se necesita una cuenta de cliente.')
+        payload = data.model_dump(mode='json', exclude={'idempotency_key'})
+        request_hash = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        key = str(data.idempotency_key)
+
+        def existing(cursor):
+            cursor.execute('SELECT * FROM orders WHERE customer_id=%s AND idempotency_key=%s', (user['id'], key))
+            row = cursor.fetchone()
+            if row and row['request_hash'] != request_hash:
+                raise HTTPException(409, 'La clave del pedido ya fue usada con otros datos.')
+            return row
+
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                previous = existing(cursor)
+                if previous:
+                    db.commit()
+                    return previous
+                cursor.execute('''SELECT b.id FROM restaurant_branches b JOIN restaurants r ON r.id=b.restaurant_id
+                    WHERE b.id=%s AND b.restaurant_id=%s AND b.active=1 AND r.active=1''', (data.branch_id, data.restaurant_id))
+                if not cursor.fetchone():
+                    raise HTTPException(404, 'Restaurante o sucursal no disponible.')
+                items = []
+                for item in sorted(data.items, key=lambda value: value.product_id):
+                    cursor.execute('''SELECT id, name, price, currency FROM menu_products
+                        WHERE id=%s AND restaurant_id=%s AND available=1 FOR UPDATE''',
+                        (item.product_id, data.restaurant_id))
+                    product = cursor.fetchone()
+                    if not product or product['currency'] != 'COP':
+                        raise HTTPException(409, 'Uno de los productos ya no está disponible.')
+                    items.append((product, item.quantity))
+                total = sum(product['price'] * quantity for product, quantity in items)
+                cursor.execute('''INSERT INTO orders (customer_id, restaurant_id, branch_id, idempotency_key, request_hash,
+                    fulfillment, delivery_address, table_number, payment_method, total)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)''',
+                    (user['id'], data.restaurant_id, data.branch_id, key, request_hash, data.fulfillment,
+                     data.delivery_address, data.table_number, data.payment_method, total))
+                order_id = cursor.lastrowid
+                for product, quantity in items:
+                    cursor.execute('INSERT INTO order_items (order_id, product_id, product_name, unit_price, quantity) VALUES (%s,%s,%s,%s,%s)',
+                                   (order_id, product['id'], product['name'], product['price'], quantity))
+                cursor.execute('SELECT * FROM orders WHERE id=%s', (order_id,))
+                order = cursor.fetchone()
+            db.commit()
+            return order
+        except pymysql.IntegrityError:
+            db.rollback()
+            with db.cursor() as cursor:
+                previous = existing(cursor)
+                if previous:
+                    return previous
+            raise HTTPException(409, 'No se pudo crear el pedido.') from None
+        except Exception:
+            db.rollback()
+            raise
+
+    @app.get('/pedidos/{order_id}', response_model=OrderOutput)
+    def my_order(order_id: int, user: User, db: DB):
+        _require_orders()
+        with db.cursor() as cursor:
+            cursor.execute('SELECT * FROM orders WHERE id=%s AND customer_id=%s', (order_id, user['id']))
+            row = cursor.fetchone()
+        if not row:
+            raise HTTPException(404, 'Pedido no encontrado.')
+        return row
+
+    @app.get('/pedidos/{order_id}/eventos', response_model=list[OrderEventOutput])
+    def order_events(order_id: int, user: User, db: DB):
+        _require_orders()
+        with db.cursor() as cursor:
+            cursor.execute('SELECT id FROM orders WHERE id=%s AND customer_id=%s', (order_id, user['id']))
+            if not cursor.fetchone():
+                raise HTTPException(404, 'Pedido no encontrado.')
+            cursor.execute('SELECT previous_status, new_status, created_at FROM order_events WHERE order_id=%s ORDER BY id', (order_id,))
+            return cursor.fetchall()
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/pedidos', response_model=list[OrderOutput])
+    def restaurant_orders(restaurant_id: int, user: User, db: DB,
+                          limit: Annotated[int, Query(ge=1, le=100)] = 50):
+        _require_orders()
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen','cashier')", (restaurant_id, user['id']))
+            if not cursor.fetchone():
+                raise HTTPException(403, 'No tienes acceso a este restaurante.')
+            cursor.execute('SELECT * FROM orders WHERE restaurant_id=%s ORDER BY id DESC LIMIT %s', (restaurant_id, limit))
+            return cursor.fetchall()
+
+    @app.patch('/gestion/restaurantes/{restaurant_id}/pedidos/{order_id}/estado', response_model=OrderOutput)
+    def advance_kitchen_order(restaurant_id: int, order_id: int, data: OrderTransitionInput, user: User, db: DB):
+        _require_orders()
+        allowed_next = {'pending_acceptance': 'confirmed', 'confirmed': 'preparing',
+                        'preparing': 'cooked', 'cooked': 'ready', 'ready': 'delivered'}
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen')", (restaurant_id, user['id']))
+                if not cursor.fetchone():
+                    raise HTTPException(403, 'No tienes permiso para gestionar cocina.')
+                cursor.execute('SELECT * FROM orders WHERE id=%s AND restaurant_id=%s FOR UPDATE', (order_id, restaurant_id))
+                order = cursor.fetchone()
+                if not order:
+                    raise HTTPException(404, 'Pedido no encontrado.')
+                if order['fulfillment'] == 'delivery' and data.status == 'delivered':
+                    raise HTTPException(409, 'La entrega a domicilio debe confirmarla el domiciliario asignado.')
+                previous = order['status']
+                if allowed_next.get(previous) != data.status:
+                    raise HTTPException(409, 'Transición de estado no permitida.')
+                cursor.execute('UPDATE orders SET status=%s WHERE id=%s AND restaurant_id=%s', (data.status, order_id, restaurant_id))
+                cursor.execute('INSERT INTO order_events (order_id, actor_id, previous_status, new_status) VALUES (%s,%s,%s,%s)',
+                               (order_id, user['id'], previous, data.status))
+                order['status'] = data.status
+            db.commit()
+            return order
+        except Exception:
+            db.rollback()
+            raise
 
     @app.post("/auth/registro", status_code=status.HTTP_202_ACCEPTED)
     def register(data: UserRegistration, db: DB, request: Request):

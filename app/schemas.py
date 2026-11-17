@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, SecretStr
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl, SecretStr, model_validator
+from uuid import UUID
 
 Role = Literal["admin", "staff", "customer"]
 
@@ -78,4 +79,84 @@ class RequestActivityOutput(BaseModel):
     client_city: str | None
     latitude: float | None
     longitude: float | None
+    created_at: datetime
+
+
+class RestaurantOutput(BaseModel):
+    id: int
+    name: str
+    slug: str
+    description: str | None
+    image_url: str | None
+
+
+class BranchOutput(BaseModel):
+    id: int
+    restaurant_id: int
+    name: str
+    address: str
+    city: str
+    latitude: float | None
+    longitude: float | None
+
+
+class MenuProductOutput(BaseModel):
+    id: int
+    restaurant_id: int
+    name: str
+    description: str | None
+    category: str
+    price: int
+    currency: str
+    image_url: str | None
+
+
+class OrderItemInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    product_id: int = Field(gt=0)
+    quantity: int = Field(ge=1, le=100, strict=True)
+
+
+class OrderInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    restaurant_id: int = Field(gt=0)
+    branch_id: int = Field(gt=0)
+    idempotency_key: UUID
+    fulfillment: Literal['delivery', 'pickup', 'dine_in']
+    delivery_address: str | None = Field(default=None, max_length=255)
+    table_number: str | None = Field(default=None, max_length=30)
+    payment_method: Literal['cash']
+    items: list[OrderItemInput] = Field(min_length=1, max_length=50)
+
+    @model_validator(mode='after')
+    def validate_fulfillment(self):
+        if self.fulfillment == 'delivery' and not self.delivery_address:
+            raise ValueError('La dirección es obligatoria para domicilio.')
+        if self.fulfillment == 'dine_in' and not self.table_number:
+            raise ValueError('El número de mesa es obligatorio en tienda.')
+        if len({item.product_id for item in self.items}) != len(self.items):
+            raise ValueError('No repitas productos en el mismo pedido.')
+        return self
+
+
+class OrderOutput(BaseModel):
+    id: int
+    restaurant_id: int
+    branch_id: int
+    fulfillment: str
+    payment_method: str
+    payment_status: str
+    status: str
+    total: int
+    currency: str
+
+
+class OrderTransitionInput(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    status: Literal['confirmed', 'preparing', 'cooked', 'ready', 'delivered']
+
+
+class OrderEventOutput(BaseModel):
+    previous_status: str
+    new_status: str
     created_at: datetime

@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Eatsy · Panel de gestión</title>
+  <link rel="stylesheet" href="/src/styles.css">
+</head>
+<body>
+  <section class="login" id="login">
+    <form class="login-card" id="form-login">
+      <div class="brand">eatsy<span>.</span></div>
+      <p class="brand-sub">Panel de gestión</p>
+      <h1>Iniciar sesión</h1>
+      <p class="login-copy">Accede con una cuenta autorizada de la API de Eatsy.</p>
+      <div class="campo">
+        <label for="api-url">URL de la API</label>
+        <input id="api-url" type="url" value="http://127.0.0.1:8000" required>
+      </div>
+      <div class="campo">
+        <label for="login-usuario">Usuario</label>
+        <input id="login-usuario" name="usuario" autocomplete="username" required maxlength="80">
+      </div>
+      <div class="campo">
+        <label for="login-clave">Contraseña</label>
+        <input id="login-clave" name="contrasena" type="password" autocomplete="current-password" required maxlength="128">
+      </div>
+      <button class="btn" type="submit">Entrar</button>
+      <p class="login-error" id="login-error" role="alert" hidden></p>
+    </form>
+  </section>
+
+  <div class="app" id="app" hidden>
+    <aside class="sidebar">
+      <div class="brand">eatsy<span>.</span></div>
+      <p class="brand-sub">Panel de gestión</p>
+      <nav id="nav">
+        <button class="nav-item activo" data-vista="panel"><span class="ico">▦</span>Panel</button>
+        <button class="nav-item" data-vista="menu"><span class="ico">☰</span>Catálogo</button>
+        <button class="nav-item" data-vista="pedidos"><span class="ico">▤</span>Pedidos</button>
+      </nav>
+      <div class="sidebar-foot" id="usuario-info"></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <h1 id="titulo">Panel</h1>
+          <p id="subtitulo">Resumen de pedidos y catálogo.</p>
+        </div>
+        <div class="topbar-actions">
+          <select class="pill" id="restaurante" aria-label="Restaurante"></select>
+          <span class="pill" id="fecha"></span>
+          <button class="btn btn-suave" id="btn-salir">Cerrar sesión</button>
+        </div>
+      </header>
+
+      <section class="vista activa" id="vista-panel"></section>
+      <section class="vista" id="vista-menu"></section>
+      <section class="vista" id="vista-pedidos"></section>
+    </main>
+  </div>
+
+  <div class="modal" id="modal" hidden>
+    <div class="modal-caja" role="dialog" aria-modal="true" aria-labelledby="modal-titulo">
+      <div class="modal-head">
+        <h2 id="modal-titulo">Producto</h2>
+        <button class="btn-cerrar" id="modal-cerrar" aria-label="Cerrar">×</button>
+      </div>
+      <form id="form-producto" class="modal-body"></form>
+    </div>
+  </div>
+
+  <div class="aviso" id="aviso" role="status" hidden></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

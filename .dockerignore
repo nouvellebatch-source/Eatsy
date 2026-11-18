@@ -4,3 +4,10 @@ dist
 .env.local
 .git
 npm-debug.log*
+.venv
+venv
+__pycache__
+.pytest_cache
+mobile
+tests
+app

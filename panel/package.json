@@ -1,0 +1,15 @@
+{
+  "name": "eatsy-panel",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Panel de gestión de Eatsy (HTML, CSS y JavaScript con Vite).",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  }
+}

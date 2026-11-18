@@ -1,9 +1,29 @@
 .env
 .env.*
 !.env.example
+!panel/.env.example
 __pycache__/
 .pytest_cache/
 .venv/
 venv/
 certs/*.pem
 app/ca.pem
+
+# Panel web (Vite)
+node_modules/
+dist/
+panel/.env
+panel/.env.local
+
+# App móvil (Flutter)
+mobile/.dart_tool/
+mobile/build/
+mobile/.flutter-plugins-dependencies
+mobile/android/local.properties
+mobile/android/.gradle/
+mobile/android/.kotlin/
+mobile/.idea/
+*.iml
+
+# Editores
+.vscode/

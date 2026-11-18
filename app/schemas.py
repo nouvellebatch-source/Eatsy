@@ -82,6 +82,14 @@ class RequestActivityOutput(BaseModel):
     created_at: datetime
 
 
+class LoginLocationInput(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True, allow_inf_nan=False)
+    latitude: float = Field(ge=-90, le=90)
+    longitude: float = Field(ge=-180, le=180)
+    city: str | None = Field(default=None, max_length=100)
+    country: str | None = Field(default=None, max_length=100)
+
+
 class RestaurantOutput(BaseModel):
     id: int
     name: str

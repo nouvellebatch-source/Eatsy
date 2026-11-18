@@ -9,7 +9,7 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import jwt
 import pymysql
@@ -27,7 +27,7 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
-from app.schemas import ReviewedMenu, ManagedMenuItem
+from app.schemas import ReviewedMenu, ManagedMenuItem, LoginLocationInput
 from app.menu_import import MAX_BYTES, MenuReadError, extract_menu, extract_document
 from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput, CustomerReservationInput, PromotionInput, PromotionOutput, RestaurantEventInput, RestaurantEventOutput
 
@@ -203,7 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(CORSMiddleware, allow_origins=list(origins), allow_credentials=False,
                        allow_origin_regex=r'http://(?:localhost|127\.0\.0\.1):[0-9]{1,5}',
                        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                       allow_headers=["Authorization", "Content-Type", "X-Client-Country", "X-Client-City", "X-Client-Latitude", "X-Client-Longitude", "X-Device-Platform"])
+                       allow_headers=["Authorization", "Content-Type", "X-Client-Country", "X-Client-City", "X-Client-Latitude", "X-Client-Longitude", "X-Device-Platform"], expose_headers=["X-Request-ID"])
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(_: Request, exc: RequestValidationError):
@@ -904,6 +904,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise
         if user is None or not user["activo"] or not valid:
             raise unauthorized_error()
+        request.state.user_id = user["id"]
         token, issued_at, jti = create_token(user["id"], request.app.state.settings)
         return OutputToken(access_token=token, expires_in=request.app.state.settings.token_minutes * 60,
                            issued_at=issued_at, jti=jti, audience=request.app.state.settings.audience,
@@ -969,6 +970,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/auth/me", response_model=UserOutput)
     def get_me(user: User):
         return user
+
+    @app.get('/auth/sesiones', response_model=list[RequestActivityOutput])
+    def login_sessions(user: User, db: DB, limit: Annotated[int, Query(ge=1, le=50)] = 20):
+        """Últimos inicios de sesión exitosos de la cuenta actual."""
+        with db.cursor() as cursor:
+            cursor.execute("""SELECT id, metodo, ruta, status_code, response_time_ms, user_agent,
+                device_type, device_platform, client_country, client_city, latitude, longitude, created_at
+                FROM request_logs WHERE user_id=%s AND metodo='POST' AND ruta='/auth/login'
+                  AND status_code=200 ORDER BY id DESC LIMIT %s""", (user['id'], limit))
+            return cursor.fetchall()
+
+    @app.put('/auth/sesiones/{request_id}/ubicacion', status_code=204)
+    def save_login_location(request_id: UUID, data: LoginLocationInput, user: User, db: DB):
+        """Asocia coordenadas consentidas por el navegador a un login exitoso reciente."""
+        with db.cursor() as cursor:
+            cursor.execute("""UPDATE request_logs SET latitude=%s, longitude=%s, client_city=%s, client_country=%s
+                WHERE request_id=%s AND user_id=%s AND metodo='POST' AND ruta='/auth/login'
+                  AND status_code=200 AND created_at >= UTC_TIMESTAMP() - INTERVAL 10 MINUTE""",
+                (data.latitude, data.longitude, data.city or None, data.country or None, str(request_id), user['id']))
+            if not cursor.rowcount:
+                raise HTTPException(404, 'No se encontró el inicio de sesión reciente.')
+        return Response(status_code=204)
 
     @app.get("/perfil/actividad", response_model=list[RequestActivityOutput])
     def my_activity(user: User, db: DB, limit: Annotated[int, Query(ge=1, le=100)] = 30):

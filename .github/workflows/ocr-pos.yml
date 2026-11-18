@@ -1,0 +1,33 @@
+name: OCR and POS checks
+on:
+  push:
+    branches: [codex/ocr-gratis-srs]
+  pull_request:
+    paths:
+      - 'app/**'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pos_restaurante/**'
+      - '.github/workflows/ocr-pos.yml'
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - run: python -m unittest discover -s tests -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm ci
+        working-directory: pos_restaurante
+      - run: npm test
+        working-directory: pos_restaurante
+      - run: npm run build
+        working-directory: pos_restaurante

@@ -8,3 +8,6 @@ cryptography>=43,<46
 requests>=2.32,<3
 email-validator>=2,<3
 beautifulsoup4>=4.12,<5
+PyMuPDF>=1.24,<2
+rapidocr-onnxruntime==1.4.4
+Pillow>=10,<13

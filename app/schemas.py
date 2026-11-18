@@ -111,6 +111,23 @@ class MenuProductOutput(BaseModel):
     image_url: str | None
 
 
+class ReviewedMenuItem(BaseModel):
+    model_config = ConfigDict(extra='forbid', str_strip_whitespace=True)
+    name: str = Field(min_length=1, max_length=160)
+    description: str = Field(default='', max_length=1000)
+    category: str = Field(min_length=1, max_length=100)
+    price: int = Field(ge=0, le=1000000000, strict=True)
+
+
+class ReviewedMenu(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    items: list[ReviewedMenuItem] = Field(min_length=1, max_length=100)
+
+
+class ManagedMenuItem(ReviewedMenuItem):
+    available: bool
+
+
 class OrderAdditionInput(BaseModel):
     model_config = ConfigDict(extra='forbid')
     product_id: int = Field(gt=0)

@@ -1,7 +1,7 @@
 export const base = (import.meta.env.VITE_EATSY_API_URL || 'https://eatsy-1.onrender.com').replace(/\/$/, '');
-export async function request(path, {token, ...options} = {}) {
+export async function request(path, {token, timeoutMs = 60000, ...options} = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 60000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(base + path, { ...options, signal: controller.signal,
       headers: {Accept:'application/json', ...(options.body ? {'Content-Type':'application/json'} : {}),

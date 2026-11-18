@@ -55,7 +55,7 @@ class RestaurantCatalogTests(unittest.TestCase):
         app = create_app()
         endpoint = next(r.endpoint for r in app.routes if r.path == '/restaurantes/{restaurant_id}/productos')
         db = Database()
-        self.assertEqual(endpoint(42, db, ' Pizza ', 10, 2), [])
+        self.assertEqual(endpoint(42, db, unittest.mock.Mock(), ' Pizza ', 10, 2), [])
         self.assertEqual(db.c.params, (42, 'Pizza', 10, 2))
         self.assertIn('p.restaurant_id=%s', db.c.sql)
         self.assertIn('r.active=1', db.c.sql)

@@ -123,6 +123,17 @@ class OrderTests(unittest.TestCase):
         self.assertEqual(error.exception.status_code, 503)
 
     @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
+    def test_restaurant_order_search_is_scoped_and_paginated(self):
+        class SearchCursor(Cursor):
+            def fetchone(self): return {'role':'cashier'}
+            def fetchall(self): return []
+        db=DB(); db.c=SearchCursor()
+        endpoint=next(r.endpoint for r in create_app().routes if r.path == '/gestion/restaurantes/{restaurant_id}/pedidos')
+        self.assertEqual(endpoint(17, {'id':8}, db, 100, 200, '42'),[])
+        self.assertEqual(db.c.calls[-1][1],(17,'42','42',100,200))
+        self.assertIn('o.restaurant_id=%s',db.c.calls[-1][0])
+
+    @patch.dict(os.environ, {'ORDERS_ENABLED': 'true'})
     def test_order_history_is_limited_to_the_authenticated_customer(self):
         class HistoryCursor(Cursor):
             def fetchall(self): return []

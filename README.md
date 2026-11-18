@@ -108,3 +108,9 @@ python -m unittest discover -s tests -v
 
 En el panel: `cd panel && npm run build` para comprobar que compila. En la app:
 `cd mobile && flutter analyze && flutter test`.
+
+## OCR gratuito y comprobantes
+
+El POS permite leer cartas y facturas PDF en el servidor con RapidOCR y ONNX Runtime. Instala las dependencias con `pip install -r requirements.txt`; no hace falta una API ni clave de pago. Los modelos están incluidos en la versión fijada. Los PDF deben tener como máximo 5 MB y 10 páginas. La extracción propone productos que el responsable debe revisar y publicar; no reemplaza el catálogo. La lectura de facturas muestra texto para revisar, sin guardar el documento ni registrar pagos. El comprobante imprimible no es factura electrónica. Los usuarios deben contar con membresía `owner` para gestionar cartas y leer facturas. La búsqueda de comandas está paginada y el CSV incluye hasta 1.000 resultados.
+
+En Linux, OpenCV puede necesitar `libGL.so.1` y otras bibliotecas del sistema; valida una imagen de servidor antes del despliegue. El OCR consume memoria y CPU del servidor. Las pruebas con una carta escaneada de ejemplo no garantizan la calidad en documentos complejos. Ejecuta `python -m unittest discover -s tests -q` para verificarlas.

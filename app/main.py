@@ -27,6 +27,8 @@ from app.database import connection
 from app.schemas import OutputToken, ProductInput, ProductOutput, RequestActivityOutput, UserInput, UserOutput, UserRegistration, VerifyRegistration, ResendVerification
 from app.security import create_token, password_hasher, read_subject, revoke_token, unauthorized_error, verify_password
 from app.email_service import send_verification_email, EmailDeliveryError
+from app.schemas import ReviewedMenu, ManagedMenuItem
+from app.menu_import import MAX_BYTES, MenuReadError, extract_menu, extract_document
 from app.schemas import RestaurantOutput, BranchOutput, MenuProductOutput, OrderInput, OrderOutput, OrderTransitionInput, OrderEventOutput, KitchenOrderOutput, RestaurantTableOutput, PublicTableOutput, ReservationInput, ReservationOutput, CustomerReservationInput, PromotionInput, PromotionOutput, RestaurantEventInput, RestaurantEventOutput
 
 
@@ -261,6 +263,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             else:
                 cursor.execute('SELECT p.id, p.restaurant_id, p.name, p.description, p.category, p.price, p.currency, p.image_url FROM menu_products p JOIN restaurants r ON r.id=p.restaurant_id WHERE p.restaurant_id=%s AND p.available=1 AND r.active=1 ORDER BY p.name, p.id LIMIT %s OFFSET %s', (restaurant_id, limit, offset))
             return [_catalog_image_url(row, request) for row in cursor.fetchall()]
+
+    def require_menu_owner(restaurant_id: int, user: dict, db: Any) -> None:
+        with db.cursor() as cursor:
+            cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role='owner'", (restaurant_id, user['id']))
+            if not cursor.fetchone():
+                raise HTTPException(403, 'Solo el responsable del restaurante puede gestionar la carta.')
+
+    @app.get('/gestion/restaurantes/{restaurant_id}/carta')
+    def manage_menu(restaurant_id: int, user: User, db: DB,
+                    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+                    offset: Annotated[int, Query(ge=0)] = 0):
+        require_menu_owner(restaurant_id, user, db)
+        with db.cursor() as cursor:
+            cursor.execute('''SELECT id,name,description,category,price,available FROM menu_products
+                WHERE restaurant_id=%s ORDER BY id DESC LIMIT %s OFFSET %s''', (restaurant_id,limit,offset))
+            return cursor.fetchall()
+
+    @app.put('/gestion/restaurantes/{restaurant_id}/carta/{product_id}')
+    def update_menu_item(restaurant_id: int, product_id: int, data: ManagedMenuItem, user: User, db: DB):
+        require_menu_owner(restaurant_id, user, db)
+        with db.cursor() as cursor:
+            cursor.execute('''UPDATE menu_products SET name=%s,description=%s,category=%s,price=%s,available=%s
+                WHERE id=%s AND restaurant_id=%s''',
+                (data.name,data.description,data.category,data.price,data.available,product_id,restaurant_id))
+            cursor.execute('SELECT id FROM menu_products WHERE id=%s AND restaurant_id=%s', (product_id,restaurant_id))
+            if not cursor.fetchone():
+                raise HTTPException(404, 'Producto no encontrado en este restaurante.')
+        return {'id': product_id}
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/carta/extraer')
+    async def extract_menu_pdf(restaurant_id: int, request: Request, user: User, db: DB,
+                               proveedor: Annotated[str, Query(pattern='^(local|mistral)$')] = 'local'):
+        await run_in_threadpool(require_menu_owner, restaurant_id, user, db)
+        if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/pdf':
+            raise HTTPException(415, 'Selecciona un archivo PDF.')
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_BYTES:
+                raise HTTPException(413, 'El PDF no puede superar 5 MB.')
+        try:
+            return await run_in_threadpool(extract_menu, bytes(data), proveedor)
+        except MenuReadError as error:
+            raise HTTPException(422, str(error)) from None
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/facturas/leer')
+    async def read_invoice_pdf(restaurant_id: int, request: Request, response: Response, user: User, db: DB,
+                               proveedor: Annotated[str, Query(pattern='^(local|mistral)$')] = 'local'):
+        await run_in_threadpool(require_menu_owner, restaurant_id, user, db)
+        if request.headers.get('content-type', '').split(';')[0].strip().lower() != 'application/pdf':
+            raise HTTPException(415, 'Selecciona un archivo PDF.')
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_BYTES:
+                raise HTTPException(413, 'El PDF no puede superar 5 MB.')
+        try:
+            result = await run_in_threadpool(extract_document, bytes(data), proveedor)
+            response.headers['Cache-Control'] = 'no-store'
+            return result
+        except MenuReadError as error:
+            raise HTTPException(422, str(error)) from None
+
+    @app.post('/gestion/restaurantes/{restaurant_id}/carta/publicar', status_code=201)
+    def publish_reviewed_menu(restaurant_id: int, data: ReviewedMenu, user: User, db: DB):
+        require_menu_owner(restaurant_id, user, db)
+        db.begin()
+        try:
+            with db.cursor() as cursor:
+                for item in data.items:
+                    cursor.execute('''INSERT INTO menu_products (restaurant_id,name,description,category,price,currency,available)
+                        VALUES (%s,%s,%s,%s,%s,'COP',1)''',
+                        (restaurant_id, item.name, item.description, item.category, item.price))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {'created': len(data.items)}
 
     @app.post('/pedidos', response_model=OrderOutput, status_code=201)
     def create_order(data: OrderInput, user: User, db: DB):
@@ -630,15 +710,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get('/gestion/restaurantes/{restaurant_id}/pedidos', response_model=list[KitchenOrderOutput])
     def restaurant_orders(restaurant_id: int, user: User, db: DB,
-                          limit: Annotated[int, Query(ge=1, le=100)] = 50):
+                          limit: Annotated[int, Query(ge=1, le=100)] = 50,
+                          offset: Annotated[int, Query(ge=0, le=100000)] = 0,
+                          q: Annotated[str | None, Query(max_length=30)] = None):
         _require_orders()
         with db.cursor() as cursor:
             cursor.execute("SELECT role FROM restaurant_memberships WHERE restaurant_id=%s AND user_id=%s AND active=1 AND role IN ('owner','kitchen','cashier')", (restaurant_id, user['id']))
             if not cursor.fetchone():
                 raise HTTPException(403, 'No tienes acceso a este restaurante.')
-            cursor.execute('''SELECT o.*,d.code AS discount_code,COALESCE(d.discount,0) AS discount_amount,d.subtotal
+            query = '''SELECT o.*,d.code AS discount_code,COALESCE(d.discount,0) AS discount_amount,d.subtotal
                 FROM orders o LEFT JOIN order_discounts d ON d.order_id=o.id
-                WHERE o.restaurant_id=%s ORDER BY o.id DESC LIMIT %s''', (restaurant_id, limit))
+                WHERE o.restaurant_id=%s'''
+            params = [restaurant_id]
+            if q and q.strip():
+                term = q.strip().lstrip('#')
+                if not term.isdigit() or len(term) > 20:
+                    raise HTTPException(422, 'Busca por número de pedido o mesa.')
+                query += ' AND (CAST(o.id AS CHAR)=%s OR o.table_number=%s)'
+                params.extend([term, term])
+            query += ' ORDER BY o.id DESC LIMIT %s OFFSET %s'
+            params.extend([limit, offset])
+            cursor.execute(query, tuple(params))
             orders = cursor.fetchall()
             if orders:
                 placeholders = ','.join(['%s'] * len(orders))

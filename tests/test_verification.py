@@ -120,6 +120,7 @@ class VerificationTests(unittest.TestCase):
         db = DB()
         result = endpoint(UserInput(usuario='admin', contrasena='password'), db, request)
         self.assertEqual(result.access_token, 'test-token')
+        self.assertEqual(request.state.user_id, 1)
         self.assertNotIn('customer_emails', db.cur.sql)
 
 
